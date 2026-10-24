@@ -34,6 +34,20 @@ defmodule Helpers do
     end)
   end
 
+  # Sends {tag, binary of size bytes} to pid from one process per tag, all at once.
+  def blast(pid, tags, size) do
+    senders =
+      for tag <- tags do
+        bin = :binary.copy(<<tag>>, size)
+        spawn(fn ->
+          receive do
+            :go -> send(pid, {tag, bin})
+          end
+        end)
+      end
+    Enum.each(senders, &send(&1, :go))
+  end
+
   # Links to pid, unlinks on :unlink, never exits on its own.
   def linker(pid) do
     spawn(fn ->

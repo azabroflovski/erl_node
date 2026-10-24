@@ -1,20 +1,38 @@
 import type { Socket } from "node:net";
-import { decodeFrom, encode, Reader, type Term, Tuple } from "./etf.ts";
+import { decodeFrom, decodeRaw, encode, encodeRaw, Reader, type Term, Tuple } from "./etf.ts";
 import { frame, type FrameReader } from "./framing.ts";
+import { DFLAG } from "./handshake.ts";
 
 const PASS_THROUGH = 112;
+const VERSION = 131;
+const DIST_HEADER = 68;
+const DIST_FRAG_HEADER = 69;
+const DIST_FRAG_CONT = 70;
 const TICK = Buffer.alloc(4);
 // Remote nodes send a tick every net_ticktime / 4 (15 s by default) and drop
 // the connection after net_ticktime of silence. We tick on the same schedule
 // whenever we have not written anything else.
 const TICK_INTERVAL = 15_000;
+// Messages larger than this go out in fragments, like BEAM does.
+export const FRAGMENT_SIZE = 64 * 1024;
 
 export type MessageHandler = (control: Tuple, payload: Term | undefined) => void;
 
-/** A distribution connection after the handshake: 4-byte frames, ticks, pass-through messages. */
+/**
+ * A distribution connection after the handshake: 4-byte frames, ticks, messages.
+ *
+ * Without DFLAG_FRAGMENTS messages travel as pass-through frames (`p`, then
+ * versioned terms). With it BEAM only accepts and sends frames with a
+ * distribution header (`131 68`, `131 69`, `131 70`), whose terms have no
+ * version byte. We never enable the atom cache, so headers carry no atom
+ * cache references.
+ */
 export class Connection {
   private wrote = false;
   private ticker: ReturnType<typeof setInterval>;
+  private fragments = new Map<bigint, { next: bigint; parts: Buffer[] }>();
+  private nextSequence = 1n;
+  readonly fragmented: boolean;
   closed = false;
   /** Resolves with the reason once the connection is gone. */
   readonly done: Promise<Error>;
@@ -27,6 +45,7 @@ export class Connection {
     private socket: Socket,
     private reader: FrameReader,
   ) {
+    this.fragmented = (peerFlags & DFLAG.FRAGMENTS) !== 0n;
     this.done = new Promise((resolve) => (this.resolveDone = resolve));
     this.ticker = setInterval(() => {
       if (!this.wrote) this.socket.write(TICK);
@@ -45,25 +64,91 @@ export class Connection {
           this.wrote = true;
           continue;
         }
-        if (f[0] !== PASS_THROUGH) throw new Error(`unsupported distribution header ${f[0]}`);
-        const r = new Reader(f, 1);
-        const control = decodeFrom(r);
-        if (!(control instanceof Tuple)) throw new Error("control message is not a tuple");
-        const payload = r.pos < f.length ? decodeFrom(r) : undefined;
-        this.onMessage(control, payload);
+        this.receive(f);
       }
     } catch (err) {
       this.shutdown(err as Error);
     }
   }
 
+  private receive(f: Buffer) {
+    if (f[0] === PASS_THROUGH) {
+      const r = new Reader(f, 1);
+      const control = decodeFrom(r);
+      const payload = r.pos < f.length ? decodeFrom(r) : undefined;
+      return this.deliver(control, payload);
+    }
+    if (f[0] !== VERSION) throw new Error(`unsupported distribution header ${f[0]}`);
+    switch (f[1]) {
+      case DIST_HEADER:
+        return this.decodeMessage(f.subarray(2));
+      case DIST_FRAG_HEADER: {
+        const seq = f.readBigUInt64BE(2);
+        const frag = f.readBigUInt64BE(10);
+        if (frag === 1n) return this.decodeMessage(f.subarray(18));
+        this.fragments.set(seq, { next: frag - 1n, parts: [f.subarray(18)] });
+        return;
+      }
+      case DIST_FRAG_CONT: {
+        const seq = f.readBigUInt64BE(2);
+        const frag = f.readBigUInt64BE(10);
+        const pending = this.fragments.get(seq);
+        if (!pending || pending.next !== frag) throw new Error(`unexpected fragment ${frag} of sequence ${seq}`);
+        pending.parts.push(f.subarray(18));
+        if (frag !== 1n) {
+          pending.next = frag - 1n;
+          return;
+        }
+        this.fragments.delete(seq);
+        return this.decodeMessage(Buffer.concat(pending.parts));
+      }
+      default:
+        throw new Error(`unsupported distribution header 131 ${f[1]}`);
+    }
+  }
+
+  // Body after a distribution header: atom cache refs, control, payload.
+  private decodeMessage(body: Buffer) {
+    if (body[0] !== 0) throw new Error("atom cache references are not supported");
+    const r = new Reader(body, 1);
+    const control = decodeRaw(r);
+    const payload = r.pos < body.length ? decodeRaw(r) : undefined;
+    this.deliver(control, payload);
+  }
+
+  private deliver(control: Term, payload: Term | undefined) {
+    if (!(control instanceof Tuple)) throw new Error("control message is not a tuple");
+    this.onMessage(control, payload);
+  }
+
   /** Sends a control message and an optional payload. */
   send(control: Tuple, payload?: Term) {
     if (this.closed) throw new Error(`connection to ${this.peerName} is closed`);
-    const parts = [Uint8Array.of(PASS_THROUGH), encode(control)];
-    if (payload !== undefined) parts.push(encode(payload));
-    this.socket.write(frame(4, Buffer.concat(parts)));
     this.wrote = true;
+    if (!this.fragmented) {
+      const parts = [Uint8Array.of(PASS_THROUGH), encode(control)];
+      if (payload !== undefined) parts.push(encode(payload));
+      this.socket.write(frame(4, Buffer.concat(parts)));
+      return;
+    }
+    const parts = [Uint8Array.of(0), encodeRaw(control)];
+    if (payload !== undefined) parts.push(encodeRaw(payload));
+    const body = Buffer.concat(parts);
+    if (body.length <= FRAGMENT_SIZE) {
+      this.socket.write(frame(4, Buffer.concat([Uint8Array.of(VERSION, DIST_HEADER), body])));
+      return;
+    }
+    const seq = this.nextSequence++;
+    const count = Math.ceil(body.length / FRAGMENT_SIZE);
+    for (let i = 0; i < count; i++) {
+      const head = Buffer.alloc(18);
+      head[0] = VERSION;
+      head[1] = i === 0 ? DIST_FRAG_HEADER : DIST_FRAG_CONT;
+      head.writeBigUInt64BE(seq, 2);
+      head.writeBigUInt64BE(BigInt(count - i), 10);
+      const chunk = body.subarray(i * FRAGMENT_SIZE, (i + 1) * FRAGMENT_SIZE);
+      this.socket.write(frame(4, Buffer.concat([head, chunk])));
+    }
   }
 
   close() {

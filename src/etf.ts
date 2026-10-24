@@ -271,6 +271,13 @@ export function encode(term: Term): Uint8Array {
   return w.result();
 }
 
+/** Encodes a term without the version byte, to follow a distribution header. */
+export function encodeRaw(term: Term): Uint8Array {
+  const w = new Writer();
+  write(w, term);
+  return w.result();
+}
+
 function write(w: Writer, t: Term): void {
   if (typeof t === "number") {
     if (Number.isSafeInteger(t)) writeInteger(w, BigInt(t));
@@ -494,6 +501,11 @@ export function decode(bytes: Uint8Array): Term {
 export function decodeFrom(r: Reader): Term {
   const version = r.u8();
   if (version !== VERSION) throw new Error(`unsupported term version ${version}`);
+  return read(r);
+}
+
+/** Decodes one term without the version byte, as it follows a distribution header. */
+export function decodeRaw(r: Reader): Term {
   return read(r);
 }
 
