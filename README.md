@@ -28,8 +28,9 @@ await node.send("echo", ["hello", 42]);
 // GenServer.call. Elixir module names need the "Elixir." prefix.
 await node.call("app@localhost", "Elixir.Counter", atom("inc"));
 
-// :rpc.call
+// :rpc.call and :erpc.call
 await node.rpc("app@localhost", "erlang", "node"); // atom("app@localhost")
+await node.erpc("app@localhost", "erlang", "node"); // same, in a new remote process
 
 // A mailbox has its own pid, so remote processes can reply to it.
 const mb = node.spawnMailbox();
@@ -71,6 +72,11 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 - `call` (the gen_server protocol) and `rpc` (through `rex`).
   Output that the remote function writes is discarded. `call` monitors the
   target, so a missing or crashed process fails the call with `CallError`.
+- `erpc` (`:erpc.call`): runs the function in a new process on the remote
+  node; exceptions come back as `ErpcError` with the Erlang class and reason.
+- `mailbox.spawn(node, m, f, args, { link, monitor })` starts a process on
+  the remote node (`spawn_request`). Spawn requests from BEAM to us are
+  answered with `notsup`: the JS node cannot run Erlang code.
 - Links and monitors in both directions. A mailbox behaves like a process
   that traps exits: exit signals arrive as `{:EXIT, from, reason}`, monitors
   deliver `{:DOWN, ref, :process, object, reason}`. `mailbox.close(reason)`

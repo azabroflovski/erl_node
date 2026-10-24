@@ -5,12 +5,26 @@ import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
-import { isDown, Mailbox } from "./mailbox.ts";
+import { isDown, Mailbox, SpawnError } from "./mailbox.ts";
 
 export interface NodeOptions {
   /** Our node name, e.g. `js@localhost`. */
   name: string;
   cookie: string;
+}
+
+/**
+ * An `erpc` call raised. `kind` is the Erlang exception class: `throw`,
+ * `exit` or `error`; `remoteStack` is the Erlang stacktrace for errors.
+ */
+export class ErpcError extends Error {
+  constructor(
+    readonly kind: "throw" | "exit" | "error",
+    readonly reason: Term,
+    readonly remoteStack?: Term,
+  ) {
+    super(`erpc ${kind}: ${format(reason)}`);
+  }
 }
 
 /** A `call` failed because the target process is gone or exited before replying. */
@@ -239,6 +253,16 @@ export class ErlNode {
         conn.trySend(tuple(OP.UNLINK_ID_ACK, a!, d!, b));
         return;
       }
+      case OP.SPAWN_REQUEST:
+        // {29, ReqId, From, GroupLeader, MFA, Opts}: we cannot run Erlang code.
+        if (a instanceof Ref && b instanceof Pid) conn.trySend(tuple(OP.SPAWN_REPLY, a, b, 0, atom("notsup")));
+        return;
+      case OP.SPAWN_REPLY: {
+        // {31, ReqId, To, Flags, Result}
+        const [, reqId, to, flags, result] = c.elements;
+        if (reqId instanceof Ref && typeof flags === "number") this.local(to)?.spawnReply(reqId, flags, result!);
+        return;
+      }
       case OP.UNLINK_ID_ACK: {
         // {36, Id, From, To}: the remote confirmed our UNLINK_ID.
         const mb = this.local(d);
@@ -349,9 +373,12 @@ export class ErlNode {
     return this.call(node, "rex", tuple(atom("call"), atom(m), atom(f), args, gl), timeout);
   }
 
-  // A minimal group leader so that remote code doing IO does not block:
-  // output requests are acknowledged and dropped, input requests fail.
-  private groupLeaderPid(): Pid {
+  /**
+   * The group leader given to processes started through this node. It keeps
+   * remote code doing IO from blocking: output requests are acknowledged and
+   * dropped, input requests fail.
+   */
+  groupLeaderPid(): Pid {
     if (this.groupLeader) return this.groupLeader.pid;
     const gl = this.spawnMailbox();
     this.groupLeader = gl;
@@ -372,6 +399,35 @@ export class ErlNode {
     };
     void loop();
     return gl.pid;
+  }
+
+  /**
+   * `:erpc.call(node, m, f, args, timeout)`: runs the function in a new process
+   * on `node`. Exceptions come back as `ErpcError` with the Erlang class and
+   * reason. On timeout the remote process keeps running, as with `:erpc`.
+   */
+  async erpc(node: string, m: string, f: string, args: Term[] = [], timeout = 5000): Promise<Term> {
+    const mb = this.spawnMailbox();
+    try {
+      const res = this.makeRef();
+      const spawned = await mb
+        .spawn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true })
+        .catch((err) => {
+          throw err instanceof SpawnError ? new ErpcError("error", tuple(atom("erpc"), err.reason)) : err;
+        });
+      const down = (await mb.receive((msg) => isDown(msg, spawned.ref!), timeout)) as Tuple;
+      const reason = down.at(4)!;
+      // erpc:execute_call exits with {Res, Class, Reason} or {Res, error, Reason, Stack}.
+      if (reason instanceof Tuple && res.equals(reason.at(0))) {
+        const [, cls, value, stack] = reason.elements;
+        if (cls === atom("return")) return value!;
+        throw new ErpcError((cls as Atom).name as ErpcError["kind"], value!, stack);
+      }
+      if (reason === atom("noconnection")) throw new ErpcError("error", tuple(atom("erpc"), reason));
+      throw new ErpcError("exit", tuple(atom("signal"), reason));
+    } finally {
+      mb.close();
+    }
   }
 
   /** Stops listening, unregisters from EPMD and closes all connections. */

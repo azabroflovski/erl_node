@@ -48,6 +48,16 @@ defmodule Helpers do
     Enum.each(senders, &send(&1, :go))
   end
 
+  # Asks node to spawn a process and returns its spawn_reply.
+  def spawn_on(node) do
+    ref = :erlang.spawn_request(node, :erlang, :node, [])
+    receive do
+      {:spawn_reply, ^ref, status, result} -> {status, result}
+    after
+      2000 -> :timeout
+    end
+  end
+
   # Links to pid, unlinks on :unlink, never exits on its own.
   def linker(pid) do
     spawn(fn ->

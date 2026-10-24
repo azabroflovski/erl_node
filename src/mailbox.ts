@@ -1,11 +1,31 @@
 import { OP } from "./connection.ts";
-import { Atom, atom, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
+import { DFLAG } from "./handshake.ts";
+import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import type { ErlNode } from "./node.ts";
 
 export class TimeoutError extends Error {}
 
 const DOWN = atom("DOWN");
 const EXIT = atom("EXIT");
+
+/** A `spawn` request failed on the remote node, e.g. with `badopt` or `noconnection`. */
+export class SpawnError extends Error {
+  constructor(readonly reason: Term) {
+    super(`spawn failed: ${format(reason)}`);
+  }
+}
+
+export interface Spawned {
+  pid: Pid;
+  /** The monitor reference, when spawned with `monitor: true`. */
+  ref?: Ref;
+}
+
+type PendingSpawn = {
+  node: string;
+  resolve: (s: Spawned) => void;
+  reject: (err: Error) => void;
+};
 
 type Waiter = {
   match: (msg: Term) => boolean;
@@ -35,6 +55,8 @@ export class Mailbox {
   readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string }>();
   /** Remote processes monitoring this mailbox, by ref key. */
   readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
+  /** Spawn requests waiting for SPAWN_REPLY, by request id key. */
+  readonly spawns = new Map<string, PendingSpawn>();
 
   constructor(
     readonly pid: Pid,
@@ -129,6 +151,45 @@ export class Mailbox {
     return ref;
   }
 
+  /**
+   * Starts `m.f(...args)` on `node` with this mailbox as the parent, like
+   * `spawn_opt/4` with `link` and `monitor`. Resolves once the remote node
+   * has started the process. The monitor reference is the request id, as in
+   * `erlang:spawn_request/5`.
+   */
+  async spawn(
+    node: string,
+    m: string,
+    f: string,
+    args: Term[] = [],
+    opts: { link?: boolean; monitor?: boolean } = {},
+  ): Promise<Spawned> {
+    if (this.closed) throw new Error("mailbox closed");
+    const conn = await this.node.connect(node).catch(() => null);
+    if (!conn) throw new SpawnError(atom("noconnection"));
+    if (!(conn.peerFlags & DFLAG.SPAWN)) throw new SpawnError(atom("notsup"));
+    const reqId = this.node.makeRef();
+    const options: Term[] = [];
+    if (opts.link) options.push(atom("link"));
+    if (opts.monitor) options.push(atom("monitor"));
+    const mfa = tuple(atom(m), atom(f), args.length);
+    return new Promise((resolve, reject) => {
+      this.spawns.set(reqId.key, { node, resolve, reject });
+      conn.trySend(tuple(OP.SPAWN_REQUEST, reqId, this.pid, this.node.groupLeaderPid(), mfa, options), args);
+    });
+  }
+
+  /** The remote node answered a spawn request. Flags: 1 = linked, 2 = monitored. */
+  spawnReply(reqId: Ref, flags: number, result: Term) {
+    const pending = this.spawns.get(reqId.key);
+    if (!pending) return;
+    this.spawns.delete(reqId.key);
+    if (!(result instanceof Pid)) return pending.reject(new SpawnError(result));
+    if (flags & 1) this.links.set(result.key, { pid: result });
+    if (flags & 2) this.monitors.set(reqId.key, { ref: reqId, target: result, node: pending.node });
+    pending.resolve(flags & 2 ? { pid: result, ref: reqId } : { pid: result });
+  }
+
   /** Removes a monitor and drops its `:DOWN` message if one already arrived. */
   demonitor(ref: Ref) {
     const mon = this.monitors.get(ref.key);
@@ -154,6 +215,8 @@ export class Mailbox {
     }
     this.links.clear();
     this.monitoredBy.clear();
+    for (const { reject } of this.spawns.values()) reject(new Error("mailbox closed"));
+    this.spawns.clear();
     this.closed = true;
     this.node.drop(this);
     for (const w of this.waiters.splice(0)) {
@@ -191,6 +254,11 @@ export class Mailbox {
     }
     for (const [key, { pid }] of this.monitoredBy) {
       if (pid.node.name === peer) this.monitoredBy.delete(key);
+    }
+    for (const [key, { node, reject }] of this.spawns) {
+      if (node !== peer) continue;
+      this.spawns.delete(key);
+      reject(new SpawnError(noconnection));
     }
   }
 }

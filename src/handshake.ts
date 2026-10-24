@@ -23,6 +23,7 @@ export const DFLAG = {
   HANDSHAKE_23: 0x1000000n,
   UNLINK_ID: 0x2000000n,
   MANDATORY_25_DIGEST: 0x4000000n,
+  SPAWN: 0x1n << 32n,
   V4_NC: 0x4n << 32n,
 } as const;
 
@@ -49,7 +50,8 @@ export const OUR_FLAGS =
   DFLAG.DIST_MONITOR |
   DFLAG.DIST_MONITOR_NAME |
   DFLAG.EXIT_PAYLOAD |
-  DFLAG.FRAGMENTS;
+  DFLAG.FRAGMENTS |
+  DFLAG.SPAWN;
 
 export interface HandshakeResult {
   peerName: string;

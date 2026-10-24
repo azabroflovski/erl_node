@@ -1,0 +1,100 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import {
+  atom,
+  binaryToString,
+  connect,
+  type ErlNode,
+  ErpcError,
+  Pid,
+  SpawnError,
+  TimeoutError,
+  tuple,
+} from "../src/index.ts";
+import { COOKIE, startNode, type TestNode } from "./support/node.ts";
+
+let remote: TestNode;
+let node: ErlNode;
+
+beforeAll(async () => {
+  remote = await startNode("spawn_test");
+  node = await connect(remote.name, { name: "spawn_js@localhost", cookie: COOKIE });
+});
+
+afterAll(async () => {
+  await node.close();
+  await remote.stop();
+});
+
+const alive = (pid: Pid) => node.rpc(remote.name, "erlang", "is_process_alive", [pid]);
+
+test("spawn starts a process on the remote node", async () => {
+  const mb = node.spawnMailbox();
+  const { pid, ref } = await mb.spawn(remote.name, "timer", "sleep", [500]);
+  expect(pid).toBeInstanceOf(Pid);
+  expect(pid.node).toBe(atom(remote.name));
+  expect(ref).toBeUndefined();
+  expect(await alive(pid)).toBe(true);
+  mb.close();
+});
+
+test("spawn with monitor", async () => {
+  const mb = node.spawnMailbox();
+  const { pid, ref } = await mb.spawn(remote.name, "timer", "sleep", [50], { monitor: true });
+  expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("DOWN"), ref!, atom("process"), pid, atom("normal")));
+  mb.close();
+});
+
+test("spawn with link", async () => {
+  const mb = node.spawnMailbox();
+  const { pid } = await mb.spawn(remote.name, "erlang", "exit", [atom("boom")], { link: true });
+  expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("EXIT"), pid, atom("boom")));
+  mb.close();
+});
+
+test("spawn on an unknown node", async () => {
+  const mb = node.spawnMailbox();
+  const err = await mb.spawn("nobody@localhost", "erlang", "node").catch((e) => e);
+  expect(err).toBeInstanceOf(SpawnError);
+  expect(err.reason).toBe(atom("noconnection"));
+  mb.close();
+});
+
+test("erpc returns the value", async () => {
+  expect(await node.erpc(remote.name, "erlang", "node")).toBe(atom(remote.name));
+  expect(await node.erpc(remote.name, "lists", "seq", [1, 3])).toEqual([1, 2, 3]);
+  const up = await node.erpc(remote.name, "Elixir.String", "upcase", ["abc"]);
+  expect(binaryToString(up as Uint8Array)).toBe("ABC");
+});
+
+test("erpc exceptions keep their class", async () => {
+  const thrown = await node.erpc(remote.name, "erlang", "throw", [atom("ball")]).catch((e) => e);
+  expect(thrown).toBeInstanceOf(ErpcError);
+  expect([thrown.kind, thrown.reason]).toEqual(["throw", atom("ball")]);
+
+  const exited = await node.erpc(remote.name, "erlang", "exit", [atom("bye")]).catch((e) => e);
+  expect([exited.kind, exited.reason]).toEqual(["exit", atom("bye")]);
+
+  const errored = await node.erpc(remote.name, "erlang", "error", [atom("boom")]).catch((e) => e);
+  expect([errored.kind, errored.reason]).toEqual(["error", atom("boom")]);
+  expect(Array.isArray(errored.remoteStack)).toBe(true);
+});
+
+test("erpc that prints does not hang", async () => {
+  expect(await node.erpc(remote.name, "Elixir.IO", "puts", ["from erpc"])).toBe(atom("ok"));
+});
+
+test("erpc timeout", async () => {
+  await expect(node.erpc(remote.name, "timer", "sleep", [1000], 100)).rejects.toBeInstanceOf(TimeoutError);
+});
+
+test("erpc to an unknown node", async () => {
+  const err = await node.erpc("nobody@localhost", "erlang", "node").catch((e) => e);
+  expect(err).toBeInstanceOf(ErpcError);
+  expect(err.reason).toEqual(tuple(atom("erpc"), atom("noconnection")));
+});
+
+test("spawn_request from BEAM to us is refused", async () => {
+  expect(await node.rpc(remote.name, "Elixir.Helpers", "spawn_on", [node.name])).toEqual(
+    tuple(atom("error"), atom("notsup")),
+  );
+});
