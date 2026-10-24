@@ -33,8 +33,6 @@ const TICK = Buffer.alloc(4);
 // the connection after net_ticktime of silence. We tick on the same schedule
 // whenever we have not written anything else.
 const TICK_INTERVAL = 15_000;
-// Messages larger than this go out in fragments, like BEAM does.
-export const FRAGMENT_SIZE = 64 * 1024;
 
 export type MessageHandler = (control: Tuple, payload: Term | undefined) => void;
 
@@ -45,13 +43,14 @@ export type MessageHandler = (control: Tuple, payload: Term | undefined) => void
  * versioned terms). With it BEAM only accepts and sends frames with a
  * distribution header (`131 68`, `131 69`, `131 70`), whose terms have no
  * version byte. We never enable the atom cache, so headers carry no atom
- * cache references.
+ * cache references. Large incoming messages arrive in fragments; we send
+ * ours whole, since we write them to the socket in one go anyway.
  */
 export class Connection {
   private wrote = false;
   private ticker: ReturnType<typeof setInterval>;
   private fragments = new Map<bigint, { next: bigint; parts: Buffer[] }>();
-  private nextSequence = 1n;
+  /** The peer negotiated DFLAG_FRAGMENTS, so messages use distribution headers. */
   readonly fragmented: boolean;
   closed = false;
   /** Resolves with the reason once the connection is gone. */
@@ -151,24 +150,10 @@ export class Connection {
       this.socket.write(frame(4, Buffer.concat(parts)));
       return;
     }
-    const parts = [Uint8Array.of(0), encodeRaw(control)];
+    // 131 68, then zero atom cache references.
+    const parts = [Uint8Array.of(VERSION, DIST_HEADER, 0), encodeRaw(control)];
     if (payload !== undefined) parts.push(encodeRaw(payload));
-    const body = Buffer.concat(parts);
-    if (body.length <= FRAGMENT_SIZE) {
-      this.socket.write(frame(4, Buffer.concat([Uint8Array.of(VERSION, DIST_HEADER), body])));
-      return;
-    }
-    const seq = this.nextSequence++;
-    const count = Math.ceil(body.length / FRAGMENT_SIZE);
-    for (let i = 0; i < count; i++) {
-      const head = Buffer.alloc(18);
-      head[0] = VERSION;
-      head[1] = i === 0 ? DIST_FRAG_HEADER : DIST_FRAG_CONT;
-      head.writeBigUInt64BE(seq, 2);
-      head.writeBigUInt64BE(BigInt(count - i), 10);
-      const chunk = body.subarray(i * FRAGMENT_SIZE, (i + 1) * FRAGMENT_SIZE);
-      this.socket.write(frame(4, Buffer.concat([head, chunk])));
-    }
+    this.socket.write(frame(4, Buffer.concat(parts)));
   }
 
   /** Like `send`, but does nothing once the connection is closed. */

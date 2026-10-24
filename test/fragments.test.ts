@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, connect as tcpConnect, type Socket } from "node:net";
-import { Connection, FRAGMENT_SIZE } from "../src/connection.ts";
+import { Connection } from "../src/connection.ts";
 import { FrameReader } from "../src/framing.ts";
 import { DFLAG } from "../src/handshake.ts";
 import { atom, connect, type ErlNode, type Term, Tuple, tuple } from "../src/index.ts";
@@ -30,9 +30,9 @@ test("large message from BEAM arrives in fragments and is reassembled", async ()
   expect(res).toEqual(bytes(1_000_000, 7));
 });
 
-test("large message to BEAM goes out in fragments", async () => {
+test("large message to BEAM", async () => {
   const mb = node.spawnMailbox();
-  const big = [bytes(3 * FRAGMENT_SIZE + 5, 1), atom("tail"), Array.from({ length: 50_000 }, (_, i) => i)];
+  const big = [bytes(300_000, 1), atom("tail"), Array.from({ length: 50_000 }, (_, i) => i)];
   await node.send("echo", tuple(mb.pid, big));
   expect(await mb.receive(undefined, 5000)).toEqual(tuple(atom("echo"), big));
   expect(await node.rpc(remote.name, "erlang", "byte_size", [bytes(1_000_000, 3)])).toBe(1_000_000);
@@ -74,14 +74,14 @@ async function pair(flags: bigint): Promise<[Connection, Connection]> {
 
 for (const [label, flags] of [
   ["pass-through", 0n],
-  ["fragmented", DFLAG.FRAGMENTS],
+  ["distribution header", DFLAG.FRAGMENTS],
 ] as const) {
   test(`${label} framing between two connections`, async () => {
     const [a, b] = await pair(flags);
     expect(a.fragmented).toBe(flags !== 0n);
     const got: [Tuple, Term | undefined][] = [];
     b.onMessage = (c, p) => got.push([c, p]);
-    const big = bytes(5 * FRAGMENT_SIZE, 9);
+    const big = bytes(300_000, 9);
     a.send(tuple(2, atom(""), atom("x")), "small");
     a.send(tuple(2, atom(""), atom("x")), big);
     a.send(tuple(18, atom("no_payload")));

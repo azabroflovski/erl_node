@@ -92,9 +92,9 @@ The node is hidden, so it shows up in `Node.list(:hidden)` and not in
 `Node.list()`. Without `listen()` it only makes outgoing connections.
 `listen()` binds all interfaces unless `host` is given, like `erl` does.
 
-- Fragmented messages (`DFLAG_FRAGMENTS`) in both directions. Large messages
-  go out in 64 KB pieces. Incoming pieces from different remote processes
-  may arrive interleaved and are put back together per sender.
+- Fragmented messages (`DFLAG_FRAGMENTS`): BEAM sends large messages in
+  64 KB pieces, possibly interleaved between senders; they are put back
+  together per sender. Our own messages go out whole.
 
 Not supported yet: TLS distribution, the atom cache.
 
