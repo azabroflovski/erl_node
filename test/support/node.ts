@@ -4,13 +4,18 @@ export const COOKIE = "secret";
 
 // Processes every test node starts with:
 // - `:echo` replies `{:echo, msg}` to `from` for every `{from, msg}` it gets;
-// - `Counter` is a GenServer, `:inc` bumps the counter and returns the new value.
+// - `Counter` is a GenServer, `:inc` bumps the counter and returns the new value;
+// - `Funs.adder/1` returns a closure, to pass funs back and forth.
 const SCRIPT = `
 defmodule Counter do
   use GenServer
   def init(n), do: {:ok, n}
   def handle_call(:inc, _from, n), do: {:reply, n + 1, n + 1}
   def handle_call(:get, _from, n), do: {:reply, n, n}
+end
+
+defmodule Funs do
+  def adder(x), do: fn y -> x + y end
 end
 
 defmodule Echo do

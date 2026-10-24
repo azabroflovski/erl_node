@@ -1,5 +1,20 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { atom, binaryToString, decode, encode, float, Pid, Ref, Tuple, tuple } from "../src/etf.ts";
+import {
+  atom,
+  binaryToString,
+  BitBinary,
+  decode,
+  encode,
+  Export,
+  float,
+  Fun,
+  ImproperList,
+  Pid,
+  Port,
+  Ref,
+  Tuple,
+  tuple,
+} from "../src/etf.ts";
 import { runElixir } from "./support/node.ts";
 
 // Terms are rendered by Elixir itself; each one must survive decode → encode
@@ -44,6 +59,18 @@ const TERMS = [
   "make_ref()",
   "{self(), make_ref(), %{ref: make_ref()}}",
   "Enum.to_list(1..70000)",
+  "2 ** 2100",
+  "-(2 ** 2100)",
+  "[1 | 2]",
+  "[:a, [] | :c]",
+  "[1, 2 | <<3>>]",
+  "<<1::3>>",
+  "<<255, 1::1>>",
+  "&:lists.seq/2",
+  "&Enum.map/2",
+  "fn -> :ok end",
+  "(fn x -> fn y -> {x, y} end end).({:free, self(), [1 | 2]})",
+  "hd(Port.list())",
 ];
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
@@ -84,6 +111,19 @@ describe("decode", () => {
     expect(decode(Buffer.from(rendered[TERMS.indexOf("~c\"abc\"")]!, "hex"))).toEqual([97, 98, 99]);
     const bin = decode(Buffer.from(rendered[TERMS.indexOf('"привет"')]!, "hex"));
     expect(binaryToString(bin as Uint8Array)).toBe("привет");
+  });
+
+  test("newer shapes", () => {
+    const at = (src: string) => decode(Buffer.from(rendered[TERMS.indexOf(src)]!, "hex"));
+    expect(at("[1 | 2]")).toEqual(new ImproperList([1], 2));
+    expect(at("<<255, 1::1>>")).toEqual(new BitBinary(new Uint8Array([255, 0x80]), 1));
+    expect(at("&:lists.seq/2")).toEqual(new Export(atom("lists"), atom("seq"), 2));
+    expect(at("hd(Port.list())")).toBeInstanceOf(Port);
+    const fun = at("(fn x -> fn y -> {x, y} end end).({:free, self(), [1 | 2]})") as Fun;
+    expect(fun).toBeInstanceOf(Fun);
+    expect(fun.arity).toBe(1);
+    expect(fun.freeVars).toHaveLength(1);
+    expect(at("2 ** 2100")).toBe(2n ** 2100n);
   });
 
   test("old latin-1 atoms", () => {

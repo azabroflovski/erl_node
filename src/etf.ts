@@ -1,10 +1,12 @@
-// Erlang External Term Format: the subset erlnode needs.
+// Erlang External Term Format.
 // https://www.erlang.org/doc/apps/erts/erl_ext_dist.html
 
 export const VERSION = 131;
 
 const NEW_FLOAT_EXT = 70;
+const BIT_BINARY_EXT = 77;
 const NEW_PID_EXT = 88;
+const NEW_PORT_EXT = 89;
 const NEWER_REFERENCE_EXT = 90;
 const SMALL_INTEGER_EXT = 97;
 const INTEGER_EXT = 98;
@@ -16,10 +18,14 @@ const STRING_EXT = 107;
 const LIST_EXT = 108;
 const BINARY_EXT = 109;
 const SMALL_BIG_EXT = 110;
+const LARGE_BIG_EXT = 111;
+const NEW_FUN_EXT = 112;
+const EXPORT_EXT = 113;
 const SMALL_ATOM_EXT = 115;
 const MAP_EXT = 116;
 const ATOM_UTF8_EXT = 118;
 const SMALL_ATOM_UTF8_EXT = 119;
+const V4_PORT_EXT = 120;
 
 /** An Erlang atom. Instances are interned: `atom("ok") === atom("ok")`. */
 export class Atom {
@@ -103,6 +109,60 @@ export class Ref {
   }
 }
 
+export class Port {
+  constructor(
+    readonly node: Atom,
+    readonly id: bigint,
+    readonly creation: number,
+  ) {}
+
+  toString(): string {
+    return `#Port<${this.node}.${this.id}>`;
+  }
+}
+
+/** A list whose tail is not `[]`, e.g. `[1 | 2]`. `items` is never empty. */
+export class ImproperList {
+  constructor(
+    readonly items: Term[],
+    readonly tail: Term,
+  ) {}
+}
+
+/** A bitstring whose length is not a whole number of bytes. Only the high `bits` bits of the last byte are used. */
+export class BitBinary {
+  constructor(
+    readonly bytes: Uint8Array,
+    readonly bits: number,
+  ) {}
+}
+
+/** An external fun, `&module.function/arity`. */
+export class Export {
+  constructor(
+    readonly module: Atom,
+    readonly fn: Atom,
+    readonly arity: number,
+  ) {}
+}
+
+/**
+ * A local fun. It can be passed back to the node that created it and called
+ * there, but not called from JS.
+ */
+export class Fun {
+  constructor(
+    readonly arity: number,
+    readonly uniq: Uint8Array,
+    readonly index: number,
+    readonly module: Atom,
+    readonly oldIndex: Term,
+    readonly oldUniq: Term,
+    readonly pid: Pid,
+    readonly freeVars: Term[],
+  ) {}
+}
+
 /** Forces a number to be encoded as a float, e.g. `float(1)` → `1.0`. */
 export class Float {
   constructor(readonly value: number) {}
@@ -132,6 +192,11 @@ export type Term =
   | Tuple
   | Pid
   | Ref
+  | Port
+  | ImproperList
+  | BitBinary
+  | Export
+  | Fun
   | Term[]
   | Map<Term, Term>
   | { [key: string]: Term };
@@ -184,6 +249,9 @@ class Writer {
     this.reserve(8);
     this.view.setFloat64(this.length, v);
     this.length += 8;
+  }
+  patchU32(pos: number, v: number) {
+    this.view.setUint32(pos, v);
   }
   bytes(b: Uint8Array) {
     this.reserve(b.length);
@@ -249,6 +317,42 @@ function write(w: Writer, t: Term): void {
     w.u32(t.id);
     w.u32(t.serial);
     w.u32(t.creation);
+  } else if (t instanceof ImproperList) {
+    if (t.items.length === 0) throw new TypeError("ImproperList needs at least one item");
+    w.u8(LIST_EXT);
+    w.u32(t.items.length);
+    for (const e of t.items) write(w, e);
+    write(w, t.tail);
+  } else if (t instanceof BitBinary) {
+    w.u8(BIT_BINARY_EXT);
+    w.u32(t.bytes.length);
+    w.u8(t.bits);
+    w.bytes(t.bytes);
+  } else if (t instanceof Export) {
+    w.u8(EXPORT_EXT);
+    write(w, t.module);
+    write(w, t.fn);
+    writeInteger(w, BigInt(t.arity));
+  } else if (t instanceof Fun) {
+    const start = w.length;
+    w.u8(NEW_FUN_EXT);
+    w.u32(0); // size, patched below
+    w.u8(t.arity);
+    w.bytes(t.uniq);
+    w.u32(t.index);
+    w.u32(t.freeVars.length);
+    write(w, t.module);
+    write(w, t.oldIndex);
+    write(w, t.oldUniq);
+    write(w, t.pid);
+    for (const v of t.freeVars) write(w, v);
+    w.patchU32(start + 1, w.length - start - 1);
+  } else if (t instanceof Port) {
+    w.u8(V4_PORT_EXT);
+    writeAtom(w, t.node.name);
+    w.u32(Number(t.id >> 32n));
+    w.u32(Number(t.id & 0xffffffffn));
+    w.u32(t.creation);
   } else if (t instanceof Ref) {
     w.u8(NEWER_REFERENCE_EXT);
     w.u16(t.ids.length);
@@ -289,9 +393,13 @@ function writeInteger(w: Writer, n: bigint) {
       digits.push(Number(abs & 0xffn));
       abs >>= 8n;
     }
-    if (digits.length > 255) throw new RangeError("integer too large (LARGE_BIG_EXT is not supported)");
-    w.u8(SMALL_BIG_EXT);
-    w.u8(digits.length);
+    if (digits.length < 256) {
+      w.u8(SMALL_BIG_EXT);
+      w.u8(digits.length);
+    } else {
+      w.u8(LARGE_BIG_EXT);
+      w.u32(digits.length);
+    }
     w.u8(n < 0n ? 1 : 0);
     for (const d of digits) w.u8(d);
   }
@@ -396,8 +504,9 @@ function read(r: Reader): Term {
       return r.u8();
     case INTEGER_EXT:
       return r.i32();
-    case SMALL_BIG_EXT: {
-      const n = r.u8();
+    case SMALL_BIG_EXT:
+    case LARGE_BIG_EXT: {
+      const n = tag === SMALL_BIG_EXT ? r.u8() : r.u32();
       const sign = r.u8();
       const digits = r.bytes(n);
       let v = 0n;
@@ -425,8 +534,9 @@ function read(r: Reader): Term {
       const n = r.u32();
       const items: Term[] = new Array(n);
       for (let i = 0; i < n; i++) items[i] = read(r);
-      if (r.u8() !== NIL_EXT) throw new Error("improper lists are not supported");
-      return items;
+      const tail = read(r);
+      if (Array.isArray(tail) && tail.length === 0) return items;
+      return new ImproperList(items, tail);
     }
     case SMALL_TUPLE_EXT:
     case LARGE_TUPLE_EXT: {
@@ -443,6 +553,43 @@ function read(r: Reader): Term {
         map.set(k, read(r));
       }
       return map;
+    }
+    case BIT_BINARY_EXT: {
+      const n = r.u32();
+      const bits = r.u8();
+      return new BitBinary(r.bytes(n).slice(), bits);
+    }
+    case EXPORT_EXT: {
+      const module = readAtom(r);
+      const fn = readAtom(r);
+      const arity = read(r);
+      if (typeof arity !== "number") throw new Error("expected export arity");
+      return new Export(module, fn, arity);
+    }
+    case NEW_FUN_EXT: {
+      const end = r.pos + r.u32();
+      const arity = r.u8();
+      const uniq = r.bytes(16).slice();
+      const index = r.u32();
+      const numFree = r.u32();
+      const module = readAtom(r);
+      const oldIndex = read(r);
+      const oldUniq = read(r);
+      const pid = read(r);
+      if (!(pid instanceof Pid)) throw new Error("expected fun creator pid");
+      const freeVars: Term[] = [];
+      for (let i = 0; i < numFree; i++) freeVars.push(read(r));
+      if (r.pos !== end) throw new Error("fun size does not match its contents");
+      return new Fun(arity, uniq, index, module, oldIndex, oldUniq, pid, freeVars);
+    }
+    case NEW_PORT_EXT: {
+      const node = readAtom(r);
+      return new Port(node, BigInt(r.u32()), r.u32());
+    }
+    case V4_PORT_EXT: {
+      const node = readAtom(r);
+      const id = (BigInt(r.u32()) << 32n) | BigInt(r.u32());
+      return new Port(node, id, r.u32());
     }
     case NEW_PID_EXT: {
       const node = readAtom(r);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, binaryToString, connect, type ErlNode, Pid, TimeoutError, Tuple, tuple } from "../src/index.ts";
+import { atom, binaryToString, connect, type ErlNode, Fun, Pid, TimeoutError, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
@@ -66,6 +66,12 @@ test(":rpc.call", async () => {
 test(":rpc.call that raises", async () => {
   const res = (await node.rpc(remote.name, "erlang", "error", [atom("boom")])) as Tuple;
   expect(res.at(0)).toBe(atom("badrpc"));
+});
+
+test("a fun from the remote node can be sent back and called there", async () => {
+  const fun = await node.rpc(remote.name, "Elixir.Funs", "adder", [5]);
+  expect(fun).toBeInstanceOf(Fun);
+  expect(await node.rpc(remote.name, "erlang", "apply", [fun, [1]])).toBe(6);
 });
 
 test(":rpc.call that prints does not hang", async () => {

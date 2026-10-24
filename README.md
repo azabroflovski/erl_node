@@ -51,7 +51,11 @@ await node.close();
 | charlist | array of numbers | array of numbers |
 | tuple | `Tuple` | `Tuple` (`tuple(...)`) |
 | map | `Map` | `Map`, plain object (keys become atoms) |
-| pid, reference | `Pid`, `Ref` | `Pid`, `Ref` |
+| improper list | `ImproperList` | `ImproperList` |
+| bitstring | `BitBinary` (bytes and bit count of the last byte) | `BitBinary` |
+| `&m.f/a` | `Export` | `Export` |
+| fun | `Fun` (opaque, can be sent back) | `Fun` |
+| pid, reference, port | `Pid`, `Ref`, `Port` | `Pid`, `Ref`, `Port` |
 
 Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 
@@ -68,7 +72,7 @@ It connects as a hidden node, so it shows up in `Node.list(:hidden)`
 and not in `Node.list()`.
 
 Not supported yet: links and monitors, incoming connections, fragmented
-messages, TLS distribution, improper lists, funs, ports, bit strings.
+messages, TLS distribution.
 
 ## Security
 
