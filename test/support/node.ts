@@ -36,9 +36,11 @@ export interface TestNode {
 }
 
 /** Starts an Elixir node `<sname>@localhost` and waits until it is ready. */
-export async function startNode(sname: string, cookie = COOKIE): Promise<TestNode> {
+export async function startNode(sname: string, opts: { cookie?: string; erl?: string } = {}): Promise<TestNode> {
   const name = `${sname}@localhost`;
-  const proc = Bun.spawn(["elixir", "--sname", name, "--cookie", cookie, "-e", SCRIPT], {
+  const args = ["--sname", name, "--cookie", opts.cookie ?? COOKIE];
+  if (opts.erl) args.push("--erl", opts.erl);
+  const proc = Bun.spawn(["elixir", ...args, "-e", SCRIPT], {
     stdout: "pipe",
     stderr: "inherit",
   });
