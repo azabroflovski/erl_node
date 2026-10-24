@@ -1,27 +1,11 @@
 import { randomInt } from "node:crypto";
 import { createServer, type Server, connect as tcpConnect, type Socket } from "node:net";
-import { Connection } from "./connection.ts";
+import { Connection, OP } from "./connection.ts";
 import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
-import { isDown, Mailbox, pidKey, refKey } from "./mailbox.ts";
-
-// Control message operations, see erl_dist_protocol.
-const LINK = 1;
-const SEND = 2;
-const EXIT = 3;
-const REG_SEND = 6;
-const EXIT2 = 8;
-const MONITOR_P = 19;
-const DEMONITOR_P = 20;
-const MONITOR_P_EXIT = 21;
-const SEND_SENDER = 22;
-const PAYLOAD_EXIT = 24;
-const PAYLOAD_EXIT2 = 26;
-const PAYLOAD_MONITOR_P_EXIT = 28;
-const UNLINK_ID = 35;
-const UNLINK_ID_ACK = 36;
+import { isDown, Mailbox } from "./mailbox.ts";
 
 export interface NodeOptions {
   /** Our node name, e.g. `js@localhost`. */
@@ -39,6 +23,8 @@ export class CallError extends Error {
   }
 }
 
+const EXIT = atom("EXIT");
+
 /**
  * A hidden Erlang node implemented in JS. It connects to other nodes on
  * demand and, after `listen()`, accepts connections from them.
@@ -55,12 +41,11 @@ export class ErlNode {
   private connections = new Map<string, Promise<Connection>>();
   private established = new Map<string, Connection>();
   private mailboxes = new Map<number, Mailbox>();
-  private nextPidId = 1;
-  private nextRefId = 1;
-  private unlinkId = 1;
-  private groupLeader?: Mailbox;
   private names = new Map<string, Mailbox>();
   private arrivals = new Map<string, Array<(conn: Connection) => void>>();
+  private nextPidId = 1;
+  private nextRefId = 1;
+  private groupLeader?: Mailbox;
   private server?: Server;
   private registration?: Registration;
 
@@ -82,13 +67,8 @@ export class ErlNode {
     return conn;
   }
 
-  /** @internal Like `connect`, but resolves with null instead of failing. */
-  connectOrNull(remote: string): Promise<Connection | null> {
-    return this.connect(remote).catch(() => null);
-  }
-
-  /** @internal An established connection, if there is one. */
-  connectionNow(remote: string): Connection | undefined {
+  /** The established connection to `remote`, if there is one. */
+  connection(remote: string): Connection | undefined {
     return this.established.get(remote);
   }
 
@@ -215,87 +195,60 @@ export class ErlNode {
   private dispatch(conn: Connection, c: Tuple, payload: Term | undefined) {
     const [op, a, b, d] = c.elements;
     switch (op) {
-      case SEND:
-      case SEND_SENDER:
+      case OP.SEND:
+      case OP.SEND_SENDER:
         if (payload !== undefined) this.local(b)?.deliver(payload);
         return;
-      case REG_SEND:
+      case OP.REG_SEND:
         if (payload !== undefined && d instanceof Atom) this.names.get(d.name)?.deliver(payload);
         return;
-      case LINK: {
+      case OP.LINK: {
         if (!(a instanceof Pid)) return;
         const mb = this.local(b);
-        if (mb) mb.links.set(pidKey(a), { pid: a });
-        else this.sendExit(conn, b as Pid, a, atom("noproc"));
+        if (mb) mb.links.set(a.key, { pid: a });
+        else conn.exit(b as Pid, a, atom("noproc"));
         return;
       }
-      case EXIT:
-      case PAYLOAD_EXIT:
-        if (a instanceof Pid) this.local(b)?.linkExit(a, op === EXIT ? d! : payload!);
+      case OP.EXIT:
+      case OP.PAYLOAD_EXIT:
+        if (a instanceof Pid) this.local(b)?.linkExit(a, op === OP.EXIT ? d! : payload!);
         return;
-      case EXIT2:
-      case PAYLOAD_EXIT2:
-        if (a instanceof Pid) this.local(b)?.deliver(tuple(atom("EXIT"), a, op === EXIT2 ? d! : payload!));
+      case OP.EXIT2:
+      case OP.PAYLOAD_EXIT2:
+        if (a instanceof Pid) this.local(b)?.deliver(tuple(EXIT, a, op === OP.EXIT2 ? d! : payload!));
         return;
-      case MONITOR_P: {
+      case OP.MONITOR_P: {
         if (!(a instanceof Pid) || !(d instanceof Ref)) return;
         const mb = this.localOrNamed(b);
-        if (mb) mb.monitoredBy.set(refKey(d), { ref: d, pid: a, proc: b as Pid | Atom });
-        else this.sendMonitorExit(conn, b as Pid | Atom, a, d, atom("noproc"));
+        if (mb) mb.monitoredBy.set(d.key, { ref: d, pid: a, proc: b as Pid | Atom });
+        else conn.monitorExit(b as Pid | Atom, a, d, atom("noproc"));
         return;
       }
-      case DEMONITOR_P:
-        if (d instanceof Ref) this.localOrNamed(b)?.monitoredBy.delete(refKey(d));
+      case OP.DEMONITOR_P:
+        if (d instanceof Ref) this.localOrNamed(b)?.monitoredBy.delete(d.key);
         return;
-      case MONITOR_P_EXIT:
-      case PAYLOAD_MONITOR_P_EXIT:
-        if (d instanceof Ref) this.local(b)?.monitorDown(d, op === MONITOR_P_EXIT ? c.at(4)! : payload!);
+      case OP.MONITOR_P_EXIT:
+      case OP.PAYLOAD_MONITOR_P_EXIT:
+        if (d instanceof Ref) this.local(b)?.monitorDown(d, op === OP.MONITOR_P_EXIT ? c.at(4)! : payload!);
         return;
-      case UNLINK_ID: {
+      case OP.UNLINK_ID: {
         // {35, Id, From, To}: the remote removed its link to us.
         const mb = this.local(d);
         if (!(b instanceof Pid) || !mb) return;
-        const link = mb.links.get(pidKey(b));
-        if (link && link.unlinking === undefined) mb.links.delete(pidKey(b));
-        this.sendControl(conn, tuple(UNLINK_ID_ACK, a!, d!, b));
+        if (mb.links.get(b.key)?.unlinking === undefined) mb.links.delete(b.key);
+        conn.trySend(tuple(OP.UNLINK_ID_ACK, a!, d!, b));
         return;
       }
-      case UNLINK_ID_ACK: {
+      case OP.UNLINK_ID_ACK: {
         // {36, Id, From, To}: the remote confirmed our UNLINK_ID.
         const mb = this.local(d);
         if (!(b instanceof Pid) || !mb) return;
-        const link = mb.links.get(pidKey(b));
-        if (link && link.unlinking === a) mb.links.delete(pidKey(b));
+        if (mb.links.get(b.key)?.unlinking === a) mb.links.delete(b.key);
         return;
       }
       default:
         return; // not supported yet
     }
-  }
-
-  /** @internal */
-  sendControl(conn: Connection, control: Tuple, payload?: Term) {
-    if (!conn.closed) conn.send(control, payload);
-  }
-
-  /** @internal Exit signal over a link. */
-  sendExit(conn: Connection, from: Pid, to: Pid, reason: Term) {
-    if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) this.sendControl(conn, tuple(PAYLOAD_EXIT, from, to), reason);
-    else this.sendControl(conn, tuple(EXIT, from, to, reason));
-  }
-
-  /** @internal Tells a remote monitor that the monitored process is gone. */
-  sendMonitorExit(conn: Connection, from: Pid | Atom, to: Pid, ref: Ref, reason: Term) {
-    if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) {
-      this.sendControl(conn, tuple(PAYLOAD_MONITOR_P_EXIT, from, to, ref), reason);
-    } else {
-      this.sendControl(conn, tuple(MONITOR_P_EXIT, from, to, ref, reason));
-    }
-  }
-
-  /** @internal */
-  nextUnlinkId(): number {
-    return this.unlinkId++;
   }
 
   makePid(): Pid {
@@ -315,8 +268,8 @@ export class ErlNode {
     return mb;
   }
 
-  /** @internal */
-  unregister(mb: Mailbox) {
+  /** Forgets a closed mailbox and its names. Called by `Mailbox.close`. */
+  drop(mb: Mailbox) {
     this.mailboxes.delete(mb.pid.id);
     for (const [name, owner] of this.names) if (owner === mb) this.names.delete(name);
   }
@@ -352,14 +305,14 @@ export class ErlNode {
     const from = opts.from ?? this.pid;
     if (to instanceof Pid) {
       const conn = await this.connect(to.node.name);
-      if (conn.peerFlags & DFLAG.SEND_SENDER) conn.send(tuple(SEND_SENDER, from, to), msg);
-      else conn.send(tuple(SEND, atom(""), to), msg);
+      if (conn.peerFlags & DFLAG.SEND_SENDER) conn.send(tuple(OP.SEND_SENDER, from, to), msg);
+      else conn.send(tuple(OP.SEND, atom(""), to), msg);
       return;
     }
     const node = opts.node ?? this.remote;
     if (!node) throw new Error("no node given for a registered name");
     const conn = await this.connect(node);
-    conn.send(tuple(REG_SEND, from, atom(""), atom(to)), msg);
+    conn.send(tuple(OP.REG_SEND, from, atom(""), atom(to)), msg);
   }
 
   /**

@@ -1,7 +1,11 @@
+import { OP } from "./connection.ts";
 import { Atom, atom, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import type { ErlNode } from "./node.ts";
 
 export class TimeoutError extends Error {}
+
+const DOWN = atom("DOWN");
+const EXIT = atom("EXIT");
 
 type Waiter = {
   match: (msg: Term) => boolean;
@@ -10,13 +14,7 @@ type Waiter = {
   timer?: ReturnType<typeof setTimeout>;
 };
 
-/** @internal */
-export const pidKey = (p: Pid): string => `${p.node.name}/${p.id}/${p.serial}/${p.creation}`;
-/** @internal */
-export const refKey = (r: Ref): string => `${r.node.name}/${r.creation}/${r.ids.join(".")}`;
-
-const DOWN = atom("DOWN");
-const EXIT = atom("EXIT");
+let nextUnlinkId = 1;
 
 /**
  * A process-like mailbox owned by the JS node, addressable by its pid.
@@ -30,11 +28,12 @@ export class Mailbox {
   private waiters: Waiter[] = [];
   closed = false;
 
-  /** @internal Linked pids; `unlinking` holds the id of a pending UNLINK_ID. */
+  // The fields below are kept up to date by ErlNode as signals arrive.
+  /** Linked pids by key; `unlinking` holds the id of a pending UNLINK_ID. */
   readonly links = new Map<string, { pid: Pid; unlinking?: number }>();
-  /** @internal Monitors this mailbox owns. */
+  /** Monitors this mailbox owns, by ref key. */
   readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string }>();
-  /** @internal Remote processes monitoring this mailbox. */
+  /** Remote processes monitoring this mailbox, by ref key. */
   readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
 
   constructor(
@@ -42,7 +41,7 @@ export class Mailbox {
     private node: ErlNode,
   ) {}
 
-  /** @internal */
+  /** Puts a message into the mailbox. */
   deliver(msg: Term) {
     if (this.closed) return;
     const i = this.waiters.findIndex((w) => w.match(msg));
@@ -84,32 +83,30 @@ export class Mailbox {
 
   /** Links to `pid`. If its node cannot be reached, `{:EXIT, pid, :noconnection}` arrives. */
   async link(pid: Pid): Promise<void> {
-    this.ensureOpen();
-    const key = pidKey(pid);
-    const existing = this.links.get(key);
+    if (this.closed) throw new Error("mailbox closed");
+    const existing = this.links.get(pid.key);
     if (existing && existing.unlinking === undefined) return;
-    this.links.set(key, { pid });
-    const conn = await this.node.connectOrNull(pid.node.name);
+    this.links.set(pid.key, { pid });
+    const conn = await this.node.connect(pid.node.name).catch(() => null);
     if (!conn) {
-      this.links.delete(key);
+      this.links.delete(pid.key);
       this.deliver(tuple(EXIT, pid, atom("noconnection")));
       return;
     }
-    this.node.sendControl(conn, tuple(1, this.pid, pid));
+    conn.trySend(tuple(OP.LINK, this.pid, pid));
   }
 
   /** Removes the link to `pid`. Exit signals from it are ignored from now on. */
   async unlink(pid: Pid): Promise<void> {
-    const key = pidKey(pid);
-    const link = this.links.get(key);
+    const link = this.links.get(pid.key);
     if (!link || link.unlinking !== undefined) return;
-    const conn = this.node.connectionNow(pid.node.name);
+    const conn = this.node.connection(pid.node.name);
     if (!conn) {
-      this.links.delete(key);
+      this.links.delete(pid.key);
       return;
     }
-    link.unlinking = this.node.nextUnlinkId();
-    this.node.sendControl(conn, tuple(35, link.unlinking, this.pid, pid));
+    link.unlinking = nextUnlinkId++;
+    conn.trySend(tuple(OP.UNLINK_ID, link.unlinking, this.pid, pid));
   }
 
   /**
@@ -117,30 +114,28 @@ export class Mailbox {
    * to `connect`). Resolves with the monitor reference.
    */
   async monitor(target: Pid | string, node?: string): Promise<Ref> {
-    this.ensureOpen();
+    if (this.closed) throw new Error("mailbox closed");
     const ref = this.node.makeRef();
     const proc = typeof target === "string" ? atom(target) : target;
     const nodeName = proc instanceof Pid ? proc.node.name : (node ?? this.node.remote);
     if (!nodeName) throw new Error("no node given for a registered name");
-    const conn = await this.node.connectOrNull(nodeName);
+    const conn = await this.node.connect(nodeName).catch(() => null);
     if (!conn) {
       this.deliver(tuple(DOWN, ref, atom("process"), downObject(proc, nodeName), atom("noconnection")));
       return ref;
     }
-    this.monitors.set(refKey(ref), { ref, target: proc, node: nodeName });
-    this.node.sendControl(conn, tuple(19, this.pid, proc, ref));
+    this.monitors.set(ref.key, { ref, target: proc, node: nodeName });
+    conn.trySend(tuple(OP.MONITOR_P, this.pid, proc, ref));
     return ref;
   }
 
   /** Removes a monitor and drops its `:DOWN` message if one already arrived. */
   demonitor(ref: Ref) {
-    const key = refKey(ref);
-    const mon = this.monitors.get(key);
+    const mon = this.monitors.get(ref.key);
     this.queue = this.queue.filter((m) => !isDown(m, ref));
     if (!mon) return;
-    this.monitors.delete(key);
-    const conn = this.node.connectionNow(mon.node);
-    if (conn) this.node.sendControl(conn, tuple(20, this.pid, mon.target, ref));
+    this.monitors.delete(ref.key);
+    this.node.connection(mon.node)?.trySend(tuple(OP.DEMONITOR_P, this.pid, mon.target, ref));
   }
 
   /**
@@ -150,51 +145,40 @@ export class Mailbox {
    */
   close(reason: Term = atom("normal")) {
     if (this.closed) return;
-    for (const ref of [...this.monitors.values()].map((m) => m.ref)) this.demonitor(ref);
+    for (const { ref } of [...this.monitors.values()]) this.demonitor(ref);
     for (const { pid, unlinking } of this.links.values()) {
-      if (unlinking !== undefined) continue;
-      const conn = this.node.connectionNow(pid.node.name);
-      if (conn) this.node.sendExit(conn, this.pid, pid, reason);
+      if (unlinking === undefined) this.node.connection(pid.node.name)?.exit(this.pid, pid, reason);
     }
     for (const { ref, pid, proc } of this.monitoredBy.values()) {
-      const conn = this.node.connectionNow(pid.node.name);
-      if (conn) this.node.sendMonitorExit(conn, proc, pid, ref, reason);
+      this.node.connection(pid.node.name)?.monitorExit(proc, pid, ref, reason);
     }
     this.links.clear();
     this.monitoredBy.clear();
     this.closed = true;
-    this.node.unregister(this);
+    this.node.drop(this);
     for (const w of this.waiters.splice(0)) {
       clearTimeout(w.timer);
       w.reject(new Error("mailbox closed"));
     }
   }
 
-  private ensureOpen() {
-    if (this.closed) throw new Error("mailbox closed");
-  }
-
-  // Signals routed here by the node.
-
-  /** @internal An exit signal over a link. */
+  /** An exit signal arrived over the link with `from`. */
   linkExit(from: Pid, reason: Term) {
-    const key = pidKey(from);
-    const link = this.links.get(key);
+    const link = this.links.get(from.key);
     if (!link || link.unlinking !== undefined) return;
-    this.links.delete(key);
+    this.links.delete(from.key);
     this.deliver(tuple(EXIT, from, reason));
   }
 
-  /** @internal */
+  /** A monitored process went away. */
   monitorDown(ref: Ref, reason: Term) {
-    const key = refKey(ref);
-    const mon = this.monitors.get(key);
+    const mon = this.monitors.get(ref.key);
     if (!mon) return;
-    this.monitors.delete(key);
+    this.monitors.delete(ref.key);
     this.deliver(tuple(DOWN, ref, atom("process"), downObject(mon.target, mon.node), reason));
   }
 
-  /** @internal The connection to `peer` is gone. */
+  /** The connection to `peer` is gone: links and monitors over it fire with `:noconnection`. */
   connectionLost(peer: string) {
     const noconnection = atom("noconnection");
     for (const [key, { pid, unlinking }] of this.links) {

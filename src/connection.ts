@@ -1,7 +1,25 @@
 import type { Socket } from "node:net";
-import { decodeFrom, decodeRaw, encode, encodeRaw, Reader, type Term, Tuple } from "./etf.ts";
+import { type Atom, decodeFrom, decodeRaw, encode, encodeRaw, type Pid, Reader, type Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { frame, type FrameReader } from "./framing.ts";
 import { DFLAG } from "./handshake.ts";
+
+// Control message operations, see erl_dist_protocol.
+export const OP = {
+  LINK: 1,
+  SEND: 2,
+  EXIT: 3,
+  REG_SEND: 6,
+  EXIT2: 8,
+  MONITOR_P: 19,
+  DEMONITOR_P: 20,
+  MONITOR_P_EXIT: 21,
+  SEND_SENDER: 22,
+  PAYLOAD_EXIT: 24,
+  PAYLOAD_EXIT2: 26,
+  PAYLOAD_MONITOR_P_EXIT: 28,
+  UNLINK_ID: 35,
+  UNLINK_ID_ACK: 36,
+} as const;
 
 const PASS_THROUGH = 112;
 const VERSION = 131;
@@ -149,6 +167,23 @@ export class Connection {
       const chunk = body.subarray(i * FRAGMENT_SIZE, (i + 1) * FRAGMENT_SIZE);
       this.socket.write(frame(4, Buffer.concat([head, chunk])));
     }
+  }
+
+  /** Like `send`, but does nothing once the connection is closed. */
+  trySend(control: Tuple, payload?: Term) {
+    if (!this.closed) this.send(control, payload);
+  }
+
+  /** Exit signal over a link from `from` to `to`. */
+  exit(from: Pid, to: Pid, reason: Term) {
+    if (this.peerFlags & DFLAG.EXIT_PAYLOAD) this.trySend(tuple(OP.PAYLOAD_EXIT, from, to), reason);
+    else this.trySend(tuple(OP.EXIT, from, to, reason));
+  }
+
+  /** Tells the monitoring process `to` that `from` is gone. */
+  monitorExit(from: Pid | Atom, to: Pid, ref: Ref, reason: Term) {
+    if (this.peerFlags & DFLAG.EXIT_PAYLOAD) this.trySend(tuple(OP.PAYLOAD_MONITOR_P_EXIT, from, to, ref), reason);
+    else this.trySend(tuple(OP.MONITOR_P_EXIT, from, to, ref, reason));
   }
 
   close() {

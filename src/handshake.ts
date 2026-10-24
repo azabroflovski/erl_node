@@ -62,6 +62,15 @@ export class HandshakeError extends Error {
   status?: string;
 }
 
+// Handshake frames have a 2-byte length.
+async function read(reader: FrameReader, what: string): Promise<Buffer> {
+  try {
+    return await reader.read(2);
+  } catch (err) {
+    throw new HandshakeError(`connection closed while waiting for ${what}`, { cause: err });
+  }
+}
+
 const digest = (cookie: string, challenge: number): Buffer =>
   createHash("md5").update(cookie + String(challenge)).digest();
 
@@ -74,13 +83,6 @@ export async function handshake(
   reader: FrameReader,
   opts: { name: string; cookie: string; creation: number },
 ): Promise<HandshakeResult> {
-  const read = async (what: string) => {
-    try {
-      return await reader.read(2);
-    } catch (err) {
-      throw new HandshakeError(`connection closed while waiting for ${what}`, { cause: err });
-    }
-  };
 
   // send_name: 'N', Flags:8, Creation:4, NLen:2, Name
   const name = Buffer.from(opts.name, "utf8");
@@ -93,7 +95,7 @@ export async function handshake(
   socket.write(frame(2, sendName));
 
   // recv_status: 's', Status
-  const status = await read("status");
+  const status = await read(reader, "status");
   if (status[0] !== 0x73) throw new HandshakeError("expected status message");
   const statusText = status.subarray(1).toString("latin1");
   if (statusText !== "ok" && statusText !== "ok_simultaneous") {
@@ -103,7 +105,7 @@ export async function handshake(
   }
 
   // recv_challenge: 'N', Flags:8, Challenge:4, Creation:4, NLen:2, Name
-  const ch = await read("challenge");
+  const ch = await read(reader, "challenge");
   if (ch[0] !== 0x4e) throw new HandshakeError("expected a version 6 challenge");
   const peerFlags = ch.readBigUInt64BE(1);
   const challenge = ch.readUInt32BE(9);
@@ -153,17 +155,10 @@ export async function acceptHandshake(
     replace: (peerName: string) => void;
   },
 ): Promise<HandshakeResult> {
-  const read = async (what: string) => {
-    try {
-      return await reader.read(2);
-    } catch (err) {
-      throw new HandshakeError(`connection closed while waiting for ${what}`, { cause: err });
-    }
-  };
   const sendStatus = (status: string) => socket.write(frame(2, Buffer.from("s" + status, "latin1")));
 
   // recv_name: 'N', Flags:8, Creation:4, NLen:2, Name
-  const nm = await read("name");
+  const nm = await read(reader, "name");
   if (nm[0] !== 0x4e) throw new HandshakeError("only version 6 handshakes are supported");
   const peerFlags = nm.readBigUInt64BE(1);
   const peerCreation = nm.readUInt32BE(9);
@@ -178,7 +173,7 @@ export async function acceptHandshake(
   sendStatus(status);
   if (status === "nok") throw new HandshakeError(`refused ${peerName}: connection attempt already in progress`);
   if (status === "alive") {
-    const answer = (await read("alive answer")).toString("latin1");
+    const answer = (await read(reader, "alive answer")).toString("latin1");
     if (answer !== "strue") throw new HandshakeError(`refused ${peerName}: already connected`);
     opts.replace(peerName);
   }
@@ -196,7 +191,7 @@ export async function acceptHandshake(
   socket.write(frame(2, ch));
 
   // recv_challenge_reply: 'r', Challenge:4, Digest:16
-  const reply = await read("challenge reply");
+  const reply = await read(reader, "challenge reply");
   if (reply[0] !== 0x72 || reply.length !== 21) throw new HandshakeError("expected challenge reply");
   if (!reply.subarray(5, 21).equals(digest(opts.cookie, ourChallenge))) {
     throw new HandshakeError(`${peerName} does not know our cookie`);

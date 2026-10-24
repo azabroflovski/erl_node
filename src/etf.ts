@@ -72,14 +72,13 @@ export class Pid {
     readonly creation: number,
   ) {}
 
+  /** A string that identifies the pid, usable as a `Map` key. */
+  get key(): string {
+    return `${this.node.name}/${this.id}/${this.serial}/${this.creation}`;
+  }
+
   equals(other: unknown): boolean {
-    return (
-      other instanceof Pid &&
-      other.node === this.node &&
-      other.id === this.id &&
-      other.serial === this.serial &&
-      other.creation === this.creation
-    );
+    return other instanceof Pid && other.key === this.key;
   }
 
   toString(): string {
@@ -94,14 +93,13 @@ export class Ref {
     readonly ids: readonly number[],
   ) {}
 
+  /** A string that identifies the reference, usable as a `Map` key. */
+  get key(): string {
+    return `${this.node.name}/${this.creation}/${this.ids.join(".")}`;
+  }
+
   equals(other: unknown): boolean {
-    return (
-      other instanceof Ref &&
-      other.node === this.node &&
-      other.creation === this.creation &&
-      other.ids.length === this.ids.length &&
-      other.ids.every((id, i) => id === this.ids[i])
-    );
+    return other instanceof Ref && other.key === this.key;
   }
 
   toString(): string {
@@ -623,14 +621,14 @@ function read(r: Reader): Term {
 function readAtom(r: Reader): Atom {
   const t = read(r);
   if (t instanceof Atom) return t;
-  if (typeof t === "boolean") return Atom.of(String(t));
+  if (typeof t === "boolean") return atom(String(t));
   throw new Error("expected an atom");
 }
 
 function toAtom(name: string): Atom | boolean {
   if (name === "true") return true;
   if (name === "false") return false;
-  return Atom.of(name);
+  return atom(name);
 }
 
 const isByte = (t: Term): boolean => typeof t === "number" && Number.isInteger(t) && t >= 0 && t <= 255;
