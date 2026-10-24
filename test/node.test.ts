@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, binaryToString, connect, type ErlNode, Fun, Pid, TimeoutError, Tuple, tuple } from "../src/index.ts";
+import { atom, binaryToString, CallError, connect, type ErlNode, Fun, Pid, TimeoutError, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
@@ -52,8 +52,21 @@ test("GenServer.call", async () => {
   expect(await node.call(remote.name, "Elixir.Counter", atom("get"))).toBe(2);
 });
 
-test("call to a missing name times out", async () => {
-  await expect(node.call(remote.name, "nobody", atom("x"), 200)).rejects.toBeInstanceOf(TimeoutError);
+test("call to a missing name fails with noproc", async () => {
+  const err = await node.call(remote.name, "nobody", atom("x")).catch((e) => e);
+  expect(err).toBeInstanceOf(CallError);
+  expect(err.reason).toBe(atom("noproc"));
+});
+
+test("call that gets no reply times out", async () => {
+  await expect(node.call(remote.name, "echo", atom("x"), 200)).rejects.toBeInstanceOf(TimeoutError);
+});
+
+test("call to a process that exits before replying", async () => {
+  const started = (await node.rpc(remote.name, "Elixir.GenServer", "start", [atom("Elixir.Counter"), 0])) as Tuple;
+  const err = await node.call(remote.name, started.at(1) as Pid, atom("stop")).catch((e) => e);
+  expect(err).toBeInstanceOf(CallError);
+  expect(err.reason).toBe(atom("bye"));
 });
 
 test(":rpc.call", async () => {

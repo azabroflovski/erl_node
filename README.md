@@ -36,6 +36,10 @@ const mb = node.spawnMailbox();
 await node.send("echo", tuple(mb.pid, "ping"));
 const reply = await mb.receive(undefined, 5000);
 
+// A {:DOWN, ref, :process, object, reason} message arrives when :echo exits.
+const ref = await mb.monitor("echo");
+mb.demonitor(ref);
+
 await node.close();
 ```
 
@@ -65,13 +69,19 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 - `send` to a pid or a registered name.
 - Mailboxes with `receive(match, timeout)`.
 - `call` (the gen_server protocol) and `rpc` (through `rex`).
-  Output that the remote function writes is discarded.
+  Output that the remote function writes is discarded. `call` monitors the
+  target, so a missing or crashed process fails the call with `CallError`.
+- Links and monitors in both directions. A mailbox behaves like a process
+  that traps exits: exit signals arrive as `{:EXIT, from, reason}`, monitors
+  deliver `{:DOWN, ref, :process, object, reason}`. `mailbox.close(reason)`
+  sends exit signals to linked and monitoring processes. When a connection
+  drops, links and monitors over it fire with `:noconnection`.
 
 The node only makes outgoing connections and does not register in EPMD.
 It connects as a hidden node, so it shows up in `Node.list(:hidden)`
 and not in `Node.list()`.
 
-Not supported yet: links and monitors, incoming connections, fragmented
+Not supported yet: incoming connections, fragmented
 messages, TLS distribution.
 
 ## Security

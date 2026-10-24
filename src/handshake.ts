@@ -6,6 +6,7 @@ import { frame, type FrameReader } from "./framing.ts";
 export const DFLAG = {
   EXTENDED_REFERENCES: 0x4n,
   DIST_MONITOR: 0x8n,
+  DIST_MONITOR_NAME: 0x20n,
   FUN_TAGS: 0x10n,
   NEW_FUN_TAGS: 0x80n,
   EXTENDED_PIDS_PORTS: 0x100n,
@@ -17,6 +18,7 @@ export const DFLAG = {
   MAP_TAG: 0x20000n,
   BIG_CREATION: 0x40000n,
   SEND_SENDER: 0x80000n,
+  EXIT_PAYLOAD: 0x400000n,
   HANDSHAKE_23: 0x1000000n,
   UNLINK_ID: 0x2000000n,
   MANDATORY_25_DIGEST: 0x4000000n,
@@ -42,7 +44,10 @@ export const OUR_FLAGS =
   DFLAG.V4_NC |
   DFLAG.UNLINK_ID |
   DFLAG.SMALL_ATOM_TAGS |
-  DFLAG.SEND_SENDER;
+  DFLAG.SEND_SENDER |
+  DFLAG.DIST_MONITOR |
+  DFLAG.DIST_MONITOR_NAME |
+  DFLAG.EXIT_PAYLOAD;
 
 export interface HandshakeResult {
   peerName: string;

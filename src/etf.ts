@@ -622,3 +622,21 @@ function toAtom(name: string): Atom | boolean {
 }
 
 const isByte = (t: Term): boolean => typeof t === "number" && Number.isInteger(t) && t >= 0 && t <= 255;
+
+/** Renders a term roughly the way Erlang prints it, for messages and debugging. */
+export function format(t: Term): string {
+  if (typeof t === "string") return JSON.stringify(t);
+  if (typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return String(t);
+  if (t instanceof Atom) return /^[a-z][a-zA-Z0-9_@]*$/.test(t.name) ? t.name : `'${t.name.replace(/'/g, "\\'")}'`;
+  if (t instanceof Float) return String(t.value);
+  if (t instanceof Uint8Array) return `<<${t.join(",")}>>`;
+  if (t instanceof Tuple) return `{${t.elements.map(format).join(",")}}`;
+  if (Array.isArray(t)) return `[${t.map(format).join(",")}]`;
+  if (t instanceof ImproperList) return `[${t.items.map(format).join(",")}|${format(t.tail)}]`;
+  if (t instanceof Map) return `#{${[...t].map(([k, v]) => `${format(k)} => ${format(v)}`).join(",")}}`;
+  if (t instanceof Pid || t instanceof Ref || t instanceof Port) return t.toString();
+  if (t instanceof Export) return `fun ${format(t.module)}:${format(t.fn)}/${t.arity}`;
+  if (t instanceof Fun) return `#Fun<${t.module.name}.${t.index}>`;
+  if (t instanceof BitBinary) return `<<${t.bytes.join(",")}:${t.bits}>>`;
+  return `#{${Object.entries(t).map(([k, v]) => `${k} => ${format(v)}`).join(",")}}`;
+}

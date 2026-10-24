@@ -2,14 +2,26 @@ import { randomInt } from "node:crypto";
 import { connect as tcpConnect, type Socket } from "node:net";
 import { Connection } from "./connection.ts";
 import { portPlease } from "./epmd.ts";
-import { Atom, atom, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
+import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { DFLAG, handshake } from "./handshake.ts";
+import { isDown, Mailbox, pidKey, refKey } from "./mailbox.ts";
 
 // Control message operations, see erl_dist_protocol.
+const LINK = 1;
 const SEND = 2;
+const EXIT = 3;
 const REG_SEND = 6;
+const EXIT2 = 8;
+const MONITOR_P = 19;
+const DEMONITOR_P = 20;
+const MONITOR_P_EXIT = 21;
 const SEND_SENDER = 22;
+const PAYLOAD_EXIT = 24;
+const PAYLOAD_EXIT2 = 26;
+const PAYLOAD_MONITOR_P_EXIT = 28;
+const UNLINK_ID = 35;
+const UNLINK_ID_ACK = 36;
 
 export interface NodeOptions {
   /** Our node name, e.g. `js@localhost`. */
@@ -17,65 +29,13 @@ export interface NodeOptions {
   cookie: string;
 }
 
-export class TimeoutError extends Error {}
-
-type Waiter = {
-  match: (msg: Term) => boolean;
-  resolve: (msg: Term) => void;
-  reject: (err: Error) => void;
-  timer?: ReturnType<typeof setTimeout>;
-};
-
-/** A process-like mailbox owned by the JS node, addressable by its pid. */
-export class Mailbox {
-  private queue: Term[] = [];
-  private waiters: Waiter[] = [];
-
+/** A `call` failed because the target process is gone or exited before replying. */
+export class CallError extends Error {
   constructor(
-    readonly pid: Pid,
-    private node: ErlNode,
-  ) {}
-
-  /** @internal */
-  deliver(msg: Term) {
-    const i = this.waiters.findIndex((w) => w.match(msg));
-    if (i === -1) {
-      this.queue.push(msg);
-      return;
-    }
-    const [w] = this.waiters.splice(i, 1);
-    clearTimeout(w!.timer);
-    w!.resolve(msg);
-  }
-
-  /** Takes the first message that satisfies `match`, waiting up to `timeout` ms for one. */
-  receive(match: (msg: Term) => boolean = () => true, timeout = Infinity): Promise<Term> {
-    const i = this.queue.findIndex(match);
-    if (i !== -1) return Promise.resolve(this.queue.splice(i, 1)[0]!);
-    return new Promise((resolve, reject) => {
-      const w: Waiter = { match, resolve, reject };
-      if (Number.isFinite(timeout)) {
-        w.timer = setTimeout(() => {
-          this.waiters.splice(this.waiters.indexOf(w), 1);
-          reject(new TimeoutError(`no message within ${timeout} ms`));
-        }, timeout);
-      }
-      this.waiters.push(w);
-    });
-  }
-
-  /** Sends `msg` with this mailbox's pid as the sender. */
-  send(to: Pid | string, msg: Term, node?: string): Promise<void> {
-    return this.node.send(to, msg, { node, from: this.pid });
-  }
-
-  /** Unregisters the mailbox; pending `receive` calls are rejected. */
-  close() {
-    this.node.unregister(this);
-    for (const w of this.waiters.splice(0)) {
-      clearTimeout(w.timer);
-      w.reject(new Error("mailbox closed"));
-    }
+    message: string,
+    readonly reason: Term,
+  ) {
+    super(message);
   }
 }
 
@@ -83,16 +43,18 @@ export class Mailbox {
 export class ErlNode {
   readonly name: Atom;
   readonly creation = randomInt(4, 2 ** 32);
-  /** Default remote node for `send` with a registered name. */
+  /** Default remote node for registered names. */
   remote?: string;
   /** Sender pid for messages sent without an explicit mailbox. */
   readonly pid: Pid;
 
   private cookie: string;
   private connections = new Map<string, Promise<Connection>>();
+  private established = new Map<string, Connection>();
   private mailboxes = new Map<number, Mailbox>();
   private nextPidId = 1;
   private nextRefId = 1;
+  private unlinkId = 1;
   private groupLeader?: Mailbox;
 
   constructor(opts: NodeOptions) {
@@ -108,12 +70,19 @@ export class ErlNode {
     if (!conn) {
       conn = this.openConnection(remote);
       this.connections.set(remote, conn);
-      conn.then(
-        (c) => c.done.then(() => this.connections.delete(remote)),
-        () => this.connections.delete(remote),
-      );
+      conn.catch(() => this.connections.delete(remote));
     }
     return conn;
+  }
+
+  /** @internal Like `connect`, but resolves with null instead of failing. */
+  connectOrNull(remote: string): Promise<Connection | null> {
+    return this.connect(remote).catch(() => null);
+  }
+
+  /** @internal An established connection, if there is one. */
+  connectionNow(remote: string): Connection | undefined {
+    return this.established.get(remote);
   }
 
   private async openConnection(remote: string): Promise<Connection> {
@@ -136,7 +105,7 @@ export class ErlNode {
         creation: this.creation,
       });
       const conn = new Connection(hs.peerName, hs.peerFlags, socket, reader);
-      conn.onMessage = (control, payload) => this.dispatch(control, payload);
+      this.adopt(remote, conn);
       return conn;
     } catch (err) {
       socket.destroy();
@@ -144,15 +113,104 @@ export class ErlNode {
     }
   }
 
-  private dispatch(control: Tuple, payload: Term | undefined) {
-    const op = control.at(0);
-    let to: Term | undefined;
-    if (op === SEND) to = control.at(2);
-    else if (op === SEND_SENDER) to = control.at(2);
-    else if (op === REG_SEND) return; // we have no registered names
-    else return; // links, monitors and the rest are not supported yet
-    if (!(to instanceof Pid) || to.node !== this.name || to.creation !== this.creation) return;
-    if (payload !== undefined) this.mailboxes.get(to.id)?.deliver(payload);
+  private adopt(remote: string, conn: Connection) {
+    this.established.set(remote, conn);
+    conn.onMessage = (control, payload) => this.dispatch(conn, control, payload);
+    void conn.done.then(() => {
+      this.established.delete(remote);
+      this.connections.delete(remote);
+      for (const mb of [...this.mailboxes.values()]) mb.connectionLost(remote);
+    });
+  }
+
+  private local(pid: Term | undefined): Mailbox | undefined {
+    if (!(pid instanceof Pid) || pid.node !== this.name || pid.creation !== this.creation) return undefined;
+    return this.mailboxes.get(pid.id);
+  }
+
+  private dispatch(conn: Connection, c: Tuple, payload: Term | undefined) {
+    const [op, a, b, d] = c.elements;
+    switch (op) {
+      case SEND:
+      case SEND_SENDER:
+        if (payload !== undefined) this.local(b)?.deliver(payload);
+        return;
+      case REG_SEND:
+        return; // we have no registered names
+      case LINK: {
+        if (!(a instanceof Pid)) return;
+        const mb = this.local(b);
+        if (mb) mb.links.set(pidKey(a), { pid: a });
+        else this.sendExit(conn, b as Pid, a, atom("noproc"));
+        return;
+      }
+      case EXIT:
+      case PAYLOAD_EXIT:
+        if (a instanceof Pid) this.local(b)?.linkExit(a, op === EXIT ? d! : payload!);
+        return;
+      case EXIT2:
+      case PAYLOAD_EXIT2:
+        if (a instanceof Pid) this.local(b)?.deliver(tuple(atom("EXIT"), a, op === EXIT2 ? d! : payload!));
+        return;
+      case MONITOR_P: {
+        if (!(a instanceof Pid) || !(d instanceof Ref)) return;
+        const mb = this.local(b);
+        if (mb) mb.monitoredBy.set(refKey(d), { ref: d, pid: a });
+        else this.sendMonitorExit(conn, b as Pid | Atom, a, d, atom("noproc"));
+        return;
+      }
+      case DEMONITOR_P:
+        if (d instanceof Ref) this.local(b)?.monitoredBy.delete(refKey(d));
+        return;
+      case MONITOR_P_EXIT:
+      case PAYLOAD_MONITOR_P_EXIT:
+        if (d instanceof Ref) this.local(b)?.monitorDown(d, op === MONITOR_P_EXIT ? c.at(4)! : payload!);
+        return;
+      case UNLINK_ID: {
+        // {35, Id, From, To}: the remote removed its link to us.
+        const mb = this.local(d);
+        if (!(b instanceof Pid) || !mb) return;
+        const link = mb.links.get(pidKey(b));
+        if (link && link.unlinking === undefined) mb.links.delete(pidKey(b));
+        this.sendControl(conn, tuple(UNLINK_ID_ACK, a!, d!, b));
+        return;
+      }
+      case UNLINK_ID_ACK: {
+        // {36, Id, From, To}: the remote confirmed our UNLINK_ID.
+        const mb = this.local(d);
+        if (!(b instanceof Pid) || !mb) return;
+        const link = mb.links.get(pidKey(b));
+        if (link && link.unlinking === a) mb.links.delete(pidKey(b));
+        return;
+      }
+      default:
+        return; // not supported yet
+    }
+  }
+
+  /** @internal */
+  sendControl(conn: Connection, control: Tuple, payload?: Term) {
+    if (!conn.closed) conn.send(control, payload);
+  }
+
+  /** @internal Exit signal over a link. */
+  sendExit(conn: Connection, from: Pid, to: Pid, reason: Term) {
+    if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) this.sendControl(conn, tuple(PAYLOAD_EXIT, from, to), reason);
+    else this.sendControl(conn, tuple(EXIT, from, to, reason));
+  }
+
+  /** @internal Tells a remote monitor that the monitored process is gone. */
+  sendMonitorExit(conn: Connection, from: Pid | Atom, to: Pid, ref: Ref, reason: Term) {
+    if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) {
+      this.sendControl(conn, tuple(PAYLOAD_MONITOR_P_EXIT, from, to, ref), reason);
+    } else {
+      this.sendControl(conn, tuple(MONITOR_P_EXIT, from, to, ref, reason));
+    }
+  }
+
+  /** @internal */
+  nextUnlinkId(): number {
+    return this.unlinkId++;
   }
 
   makePid(): Pid {
@@ -199,16 +257,23 @@ export class ErlNode {
   /**
    * `GenServer.call(to, request, timeout)` against a process on `node`.
    * `to` is a registered name (Elixir modules need the `Elixir.` prefix) or a pid.
+   * Fails with `CallError` if the process does not exist, exits before
+   * replying or its node disconnects, and with `TimeoutError` on timeout.
    */
   async call(node: string, to: Pid | string, request: Term, timeout = 5000): Promise<Term> {
-    const conn = await this.connect(node);
     const mb = this.spawnMailbox();
-    const ref = this.makeRef();
     try {
-      await this.send(to, tuple(atom("$gen_call"), tuple(mb.pid, ref), request), { node, from: mb.pid });
-      const reply = mb.receive((m) => m instanceof Tuple && m.length === 2 && ref.equals(m.at(0)), timeout);
-      const lost = conn.done.then((err) => Promise.reject(err));
-      return ((await Promise.race([reply, lost])) as Tuple).at(1)!;
+      // Like gen:call, the monitor reference doubles as the reply tag.
+      const ref = await mb.monitor(to, node);
+      await mb.send(to, tuple(atom("$gen_call"), tuple(mb.pid, ref), request), node);
+      const msg = (await mb.receive(
+        (m) => isDown(m, ref) || (m instanceof Tuple && m.length === 2 && ref.equals(m.at(0))),
+        timeout,
+      )) as Tuple;
+      if (msg.length === 2) return msg.at(1)!;
+      const reason = msg.at(4)!;
+      const target = typeof to === "string" ? `${to} on ${node}` : String(to);
+      throw new CallError(`call to ${target} failed: ${format(reason)}`, reason);
     } finally {
       mb.close();
     }

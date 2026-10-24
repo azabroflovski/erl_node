@@ -5,17 +5,45 @@ export const COOKIE = "secret";
 // Processes every test node starts with:
 // - `:echo` replies `{:echo, msg}` to `from` for every `{from, msg}` it gets;
 // - `Counter` is a GenServer, `:inc` bumps the counter and returns the new value;
-// - `Funs.adder/1` returns a closure, to pass funs back and forth.
+// - `Funs.adder/1` returns a closure, to pass funs back and forth;
+// - `Helpers` spawns processes for link and monitor tests.
 const SCRIPT = `
 defmodule Counter do
   use GenServer
   def init(n), do: {:ok, n}
   def handle_call(:inc, _from, n), do: {:reply, n + 1, n + 1}
   def handle_call(:get, _from, n), do: {:reply, n, n}
+  def handle_call(:stop, _from, n), do: {:stop, :bye, n}
 end
 
 defmodule Funs do
   def adder(x), do: fn y -> x + y end
+end
+
+defmodule Helpers do
+  # A process that sleeps until killed.
+  def sleeper, do: spawn(fn -> Process.sleep(:infinity) end)
+
+  # Monitors pid and sends {:down, reason} to report_to when it goes away.
+  def watch(pid, report_to) do
+    spawn(fn ->
+      ref = Process.monitor(pid)
+      receive do
+        {:DOWN, ^ref, :process, _, reason} -> send(report_to, {:down, reason})
+      end
+    end)
+  end
+
+  # Links to pid, unlinks on :unlink, never exits on its own.
+  def linker(pid) do
+    spawn(fn ->
+      Process.link(pid)
+      receive do
+        :unlink -> Process.unlink(pid)
+      end
+      Process.sleep(:infinity)
+    end)
+  end
 end
 
 defmodule Echo do

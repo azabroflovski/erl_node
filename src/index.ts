@@ -8,6 +8,7 @@ export {
   Export,
   Float,
   float,
+  format,
   Fun,
   ImproperList,
   Pid,
@@ -19,4 +20,5 @@ export {
 } from "./etf.ts";
 export { portPlease } from "./epmd.ts";
 export { HandshakeError } from "./handshake.ts";
-export { connect, ErlNode, Mailbox, type NodeOptions, TimeoutError } from "./node.ts";
+export { Mailbox, TimeoutError } from "./mailbox.ts";
+export { CallError, connect, ErlNode, type NodeOptions } from "./node.ts";
