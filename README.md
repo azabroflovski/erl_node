@@ -77,12 +77,29 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
   sends exit signals to linked and monitoring processes. When a connection
   drops, links and monitors over it fire with `:noconnection`.
 
-The node only makes outgoing connections and does not register in EPMD.
-It connects as a hidden node, so it shows up in `Node.list(:hidden)`
-and not in `Node.list()`.
+- Incoming connections after `node.listen()`: the node registers in the local
+  EPMD and accepts handshakes. Mailboxes can be registered under a name
+  (`mb.register("inbox")`), so Erlang code can use `send({:inbox, :"js@host"}, msg)`,
+  monitor `{:inbox, :"js@host"}` or `GenServer.call` it (answer with `node.reply(from, value)`).
 
-Not supported yet: incoming connections, fragmented
-messages, TLS distribution.
+The node is hidden, so it shows up in `Node.list(:hidden)` and not in
+`Node.list()`. Without `listen()` it only makes outgoing connections.
+`listen()` binds all interfaces unless `host` is given, like `erl` does.
+
+Not supported yet: fragmented messages, TLS distribution.
+
+## Receiving connections
+
+```ts
+import { ErlNode } from "erlnode";
+
+const node = new ErlNode({ name: "js@localhost", cookie: "secret" });
+await node.listen();
+
+const inbox = node.spawnMailbox();
+inbox.register("inbox");
+const msg = await inbox.receive(); // after send({:inbox, :"js@localhost"}, :hi) in iex
+```
 
 ## Security
 

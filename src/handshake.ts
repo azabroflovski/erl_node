@@ -55,7 +55,10 @@ export interface HandshakeResult {
   peerCreation: number;
 }
 
-export class HandshakeError extends Error {}
+export class HandshakeError extends Error {
+  /** The status the remote sent when it refused the connection, e.g. `nok`. */
+  status?: string;
+}
 
 const digest = (cookie: string, challenge: number): Buffer =>
   createHash("md5").update(cookie + String(challenge)).digest();
@@ -92,7 +95,9 @@ export async function handshake(
   if (status[0] !== 0x73) throw new HandshakeError("expected status message");
   const statusText = status.subarray(1).toString("latin1");
   if (statusText !== "ok" && statusText !== "ok_simultaneous") {
-    throw new HandshakeError(`remote node refused the connection: ${statusText}`);
+    const err = new HandshakeError(`remote node refused the connection: ${statusText}`);
+    err.status = statusText;
+    throw err;
   }
 
   // recv_challenge: 'N', Flags:8, Challenge:4, Creation:4, NLen:2, Name
@@ -123,6 +128,83 @@ export async function handshake(
   if (!ack.subarray(1, 17).equals(digest(opts.cookie, ourChallenge))) {
     throw new HandshakeError("remote node does not know our cookie");
   }
+
+  return { peerName, peerFlags, peerCreation };
+}
+
+/** What the accepting side answers to a connection attempt from `peerName`. */
+export type AcceptStatus = "ok" | "ok_simultaneous" | "nok" | "alive";
+
+/**
+ * Runs the accepting side of the version 6 handshake. `decide` picks the
+ * status to send; with `alive` the initiator tells whether it is a new
+ * incarnation, and `replace` is called before continuing if it is.
+ */
+export async function acceptHandshake(
+  socket: Socket,
+  reader: FrameReader,
+  opts: {
+    name: string;
+    cookie: string;
+    creation: number;
+    decide: (peerName: string) => AcceptStatus;
+    replace: (peerName: string) => void;
+  },
+): Promise<HandshakeResult> {
+  const read = async (what: string) => {
+    try {
+      return await reader.read(2);
+    } catch (err) {
+      throw new HandshakeError(`connection closed while waiting for ${what}`, { cause: err });
+    }
+  };
+  const sendStatus = (status: string) => socket.write(frame(2, Buffer.from("s" + status, "latin1")));
+
+  // recv_name: 'N', Flags:8, Creation:4, NLen:2, Name
+  const nm = await read("name");
+  if (nm[0] !== 0x4e) throw new HandshakeError("only version 6 handshakes are supported");
+  const peerFlags = nm.readBigUInt64BE(1);
+  const peerCreation = nm.readUInt32BE(9);
+  const peerName = nm.subarray(15, 15 + nm.readUInt16BE(13)).toString("utf8");
+  if ((peerFlags & DFLAG.HANDSHAKE_23) === 0n) {
+    sendStatus("not_allowed");
+    throw new HandshakeError(`${peerName} does not support handshake version 6`);
+  }
+
+  // send_status
+  const status = opts.decide(peerName);
+  sendStatus(status);
+  if (status === "nok") throw new HandshakeError(`refused ${peerName}: connection attempt already in progress`);
+  if (status === "alive") {
+    const answer = (await read("alive answer")).toString("latin1");
+    if (answer !== "strue") throw new HandshakeError(`refused ${peerName}: already connected`);
+    opts.replace(peerName);
+  }
+
+  // send_challenge: 'N', Flags:8, Challenge:4, Creation:4, NLen:2, Name
+  const ourChallenge = randomInt(0, 2 ** 32);
+  const name = Buffer.from(opts.name, "utf8");
+  const ch = Buffer.alloc(19 + name.length);
+  ch.write("N", 0, "latin1");
+  ch.writeBigUInt64BE(OUR_FLAGS, 1);
+  ch.writeUInt32BE(ourChallenge, 9);
+  ch.writeUInt32BE(opts.creation, 13);
+  ch.writeUInt16BE(name.length, 17);
+  name.copy(ch, 19);
+  socket.write(frame(2, ch));
+
+  // recv_challenge_reply: 'r', Challenge:4, Digest:16
+  const reply = await read("challenge reply");
+  if (reply[0] !== 0x72 || reply.length !== 21) throw new HandshakeError("expected challenge reply");
+  if (!reply.subarray(5, 21).equals(digest(opts.cookie, ourChallenge))) {
+    throw new HandshakeError(`${peerName} does not know our cookie`);
+  }
+
+  // send_challenge_ack: 'a', Digest:16
+  const ack = Buffer.alloc(17);
+  ack.write("a", 0, "latin1");
+  digest(opts.cookie, reply.readUInt32BE(1)).copy(ack, 1);
+  socket.write(frame(2, ack));
 
   return { peerName, peerFlags, peerCreation };
 }

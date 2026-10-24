@@ -35,7 +35,7 @@ export class Mailbox {
   /** @internal Monitors this mailbox owns. */
   readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string }>();
   /** @internal Remote processes monitoring this mailbox. */
-  readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid }>();
+  readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
 
   constructor(
     readonly pid: Pid,
@@ -70,6 +70,11 @@ export class Mailbox {
       }
       this.waiters.push(w);
     });
+  }
+
+  /** Registers this mailbox under `name` on its node. */
+  register(name: string) {
+    this.node.register(name, this);
   }
 
   /** Sends `msg` with this mailbox's pid as the sender. */
@@ -151,9 +156,9 @@ export class Mailbox {
       const conn = this.node.connectionNow(pid.node.name);
       if (conn) this.node.sendExit(conn, this.pid, pid, reason);
     }
-    for (const { ref, pid } of this.monitoredBy.values()) {
+    for (const { ref, pid, proc } of this.monitoredBy.values()) {
       const conn = this.node.connectionNow(pid.node.name);
-      if (conn) this.node.sendMonitorExit(conn, this.pid, pid, ref, reason);
+      if (conn) this.node.sendMonitorExit(conn, proc, pid, ref, reason);
     }
     this.links.clear();
     this.monitoredBy.clear();
