@@ -1,5 +1,5 @@
-import { afterAll, expect, test } from "bun:test";
-import { atom, start, TimeoutError, tuple } from "../src/index.ts";
+import { afterAll, expect, spyOn, test } from "bun:test";
+import { atom, type Pid, start, TimeoutError, tuple } from "../src/index.ts";
 import { COOKIE, inbox } from "./support/node.ts";
 
 // Links and monitors between two JS processes of the same node: no BEAM needed.
@@ -93,4 +93,73 @@ test("linking to a dead local process gives noproc", async () => {
   await a.link(dead.pid);
   expect(await a.receive(undefined, 500)).toEqual(tuple(atom("EXIT"), dead.pid, atom("noproc")));
   a.exit();
+});
+
+async function eventually(check: () => boolean, timeout = 1000) {
+  const end = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() > end) throw new Error("condition not met in time");
+    await Bun.sleep(5);
+  }
+}
+
+test("restart: a crashed process starts again with a new pid", async () => {
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  const pids: Pid[] = [];
+  const first = node.spawn(
+    async (self) => {
+      pids.push(self.pid);
+      self.register("restarting");
+      const msg = await self.receive();
+      if (msg === atom("crash")) throw new Error("asked to crash");
+    },
+    { restart: { delay: 10 } },
+  );
+  expect(node.whereis("restarting")).toEqual(first);
+  await node.send("restarting", atom("crash"));
+  await eventually(() => pids.length === 2 && node.whereis("restarting") !== undefined);
+  expect(pids[1]!.equals(first)).toBe(false);
+  expect(node.whereis("restarting")).toEqual(pids[1]);
+
+  // :kill is abnormal too.
+  await node.exit(pids[1]!, atom("kill"));
+  await eventually(() => pids.length === 3 && node.whereis("restarting") !== undefined);
+
+  // A normal return ends it for good.
+  await node.send("restarting", atom("done"));
+  await Bun.sleep(50);
+  expect(pids.length).toBe(3);
+  expect(node.whereis("restarting")).toBeUndefined();
+  expect(log).toHaveBeenCalledTimes(1);
+  log.mockRestore();
+});
+
+test("restart: :shutdown is not restarted", async () => {
+  let runs = 0;
+  const pid = node.spawn(
+    (self) => {
+      runs++;
+      return self.receive();
+    },
+    { restart: { delay: 10 } },
+  );
+  await node.exit(pid, atom("shutdown"));
+  await Bun.sleep(50);
+  expect(runs).toBe(1);
+});
+
+test("restart: node.close() stops restarting", async () => {
+  const other = start({ name: "local_close@localhost", cookie: COOKIE });
+  let runs = 0;
+  const pid = other.spawn(
+    (self) => {
+      runs++;
+      return self.receive();
+    },
+    { restart: { delay: 10 } },
+  );
+  await other.exit(pid, atom("kill"));
+  await other.close();
+  await Bun.sleep(50);
+  expect(runs).toBe(1);
 });

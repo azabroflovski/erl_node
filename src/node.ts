@@ -64,6 +64,8 @@ export class ErlNode {
   private groupLeader?: Process;
   private server?: Server;
   private registration?: Registration;
+  private closing = false;
+  private restarts = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(opts: NodeOptions) {
     if (!opts.name.includes("@")) throw new Error(`node name must look like name@host, got ${opts.name}`);
@@ -311,9 +313,26 @@ export class ErlNode {
    * The process exits with `:normal` when `fn` returns, and with
    * `{:js_error, message}` when it throws; the error is also logged, as
    * Erlang logs crashed processes.
+   *
+   * With `restart`, a process that exits for any reason other than
+   * `:normal`, `:shutdown` or `{:shutdown, _}` is started again after
+   * `delay` ms (1000 by default), like a `:transient` child of a supervisor.
+   * Each run gets a new pid; register a name to give it a stable address.
+   * `node.close()` stops restarting.
    */
-  spawn(fn: (self: Process) => unknown): Pid {
+  spawn(fn: (self: Process) => unknown, opts: { restart?: boolean | { delay?: number } } = {}): Pid {
     const p = this.process();
+    if (opts.restart && !this.closing) {
+      const delay = (typeof opts.restart === "object" && opts.restart.delay) || 1000;
+      p.onExit = (reason) => {
+        if (this.closing || isShutdown(reason)) return;
+        const timer = setTimeout(() => {
+          this.restarts.delete(timer);
+          if (!this.closing) this.spawn(fn, opts);
+        }, delay);
+        this.restarts.add(timer);
+      };
+    }
     void (async () => {
       try {
         await fn(p);
@@ -500,6 +519,9 @@ export class ErlNode {
 
   /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
   async close() {
+    this.closing = true;
+    for (const timer of this.restarts) clearTimeout(timer);
+    this.restarts.clear();
     for (const p of [...this.processes.values()]) p.exit(atom("shutdown"));
     this.groupLeader = undefined;
     this.registration?.close();
@@ -509,6 +531,12 @@ export class ErlNode {
     const conns = await Promise.allSettled(this.connections.values());
     for (const c of conns) if (c.status === "fulfilled") c.value.close();
   }
+}
+
+/** `:normal`, `:shutdown` and `{:shutdown, _}`: exits a supervisor does not restart. */
+function isShutdown(reason: Term): boolean {
+  if (reason === atom("normal") || reason === atom("shutdown")) return true;
+  return reason instanceof Tuple && reason.length === 2 && reason.at(0) === atom("shutdown");
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

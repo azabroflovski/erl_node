@@ -50,6 +50,10 @@ export class Process {
   private queue: Term[] = [];
   private waiters: Waiter[] = [];
   alive = true;
+  /** Why the process exited; undefined while it is alive. */
+  exitReason?: Term;
+  /** Called once when the process exits. Set by `node.spawn` for restarts. */
+  onExit?: (reason: Term) => void;
   /** `Process.flag(:trap_exit, true)`: turn exit signals into messages. */
   trapExit = false;
 
@@ -308,6 +312,7 @@ export class Process {
   exit(reason: Term = atom("normal")) {
     if (!this.alive) return;
     this.alive = false;
+    this.exitReason = reason;
     for (const { ref } of [...this.monitors.values()]) this.demonitor(ref);
     // Signals to local processes are delivered after this exit completes,
     // as they would be asynchronous in Erlang.
@@ -329,6 +334,7 @@ export class Process {
       clearTimeout(w.timer);
       w.reject(new Error("process exited"));
     }
+    this.onExit?.(reason);
   }
 
   /** An exit signal arrived over the link with `from`. */
