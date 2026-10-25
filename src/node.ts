@@ -348,6 +348,51 @@ export class ErlNode {
   }
 
   /**
+   * Calls `handler` for every broadcast on Phoenix.PubSub `topic` of `remote`:
+   * `node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => ...)`.
+   * When the subscription or the connection is lost, it subscribes again
+   * after `retry` ms (1000 by default). Errors thrown by `handler` are logged
+   * and do not end the subscription. Returns a function that unsubscribes.
+   *
+   * It is a process running the usual loop: `self.subscribe`, `for await`,
+   * `trapExit` to notice when the relay goes away.
+   */
+  subscribe(
+    remote: string,
+    pubsub: string,
+    topic: string,
+    handler: (event: Term) => unknown,
+    opts: { retry?: number } = {},
+  ): () => Promise<void> {
+    const retry = opts.retry ?? 1000;
+    const pid = this.spawn(async (self) => {
+      self.trapExit = true;
+      let failing = false;
+      while (self.alive) {
+        try {
+          await self.subscribe(remote, pubsub, topic);
+          failing = false;
+          for await (const msg of self) {
+            if (msg instanceof Tuple && msg.at(0) === atom("EXIT")) break; // relay or connection gone
+            try {
+              await handler(msg);
+            } catch (err) {
+              console.error(`erlnode: handler for ${topic} on ${remote} failed:`, err);
+            }
+          }
+        } catch (err) {
+          if (!self.alive) return;
+          if (!failing) console.error(`erlnode: cannot subscribe to ${topic} on ${remote}, retrying:`, err);
+          failing = true;
+        }
+        // Wait before the next attempt; a stopped process ends the wait at once.
+        await self.receive(() => false, retry).catch(() => {});
+      }
+    });
+    return () => this.exit(pid, atom("kill"));
+  }
+
+  /**
    * Sends an exit signal to `pid`, like `Process.exit/2`. `:kill` ends the
    * process unconditionally; other reasons follow the target's `trapExit`.
    */
