@@ -1,6 +1,8 @@
 // Erlang External Term Format.
 // https://www.erlang.org/doc/apps/erts/erl_ext_dist.html
 
+import { erlangName } from "./names.ts";
+
 export const VERSION = 131;
 
 const NEW_FLOAT_EXT = 70;
@@ -732,4 +734,31 @@ function plain(t: Term): unknown {
  */
 export function copy(t: Term): Term {
   return decode(encode(t));
+}
+
+/**
+ * A keyword list, the usual way to pass options in Elixir:
+ * `kw({ timeout: 5000 })` is `[timeout: 5000]`.
+ */
+export function kw(opts: Record<string, Term>): Tuple[] {
+  return Object.entries(opts).map(([k, v]) => tuple(atom(k), v));
+}
+
+/**
+ * A map with atom keys: `amap({ name: "Bob" })` is `%{name: "Bob"}`. Plain
+ * objects encode with string keys; this is the explicit way to get atoms.
+ * Only the top level is converted.
+ */
+export function amap(fields: Record<string, Term>): Map<Term, Term> {
+  return new Map(Object.entries(fields).map(([k, v]) => [atom(k), v]));
+}
+
+/**
+ * An Elixir struct: `struct("MyApp.User", { name: "Bob" })` is
+ * `%MyApp.User{name: "Bob"}`. Fields left out are not filled with defaults.
+ */
+export function struct(module: string, fields: Record<string, Term>): Map<Term, Term> {
+  const m = amap(fields);
+  m.set(atom("__struct__"), atom(erlangName(module)));
+  return m;
 }

@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import {
+  amap,
   atom,
   binaryToString,
   BitBinary,
@@ -9,9 +10,11 @@ import {
   float,
   Fun,
   ImproperList,
+  kw,
   Pid,
   Port,
   Ref,
+  struct,
   type Term,
   toJS,
   Tuple,
@@ -185,6 +188,19 @@ describe("encode matches Elixir", () => {
 
   test("rejects what it cannot encode", () => {
     expect(() => encode(undefined as never)).toThrow("cannot encode");
+  });
+});
+
+describe("kw, amap, struct", () => {
+  test("Elixir sees a keyword list, an atom-key map and a struct", async () => {
+    const bytes = encode([kw({ timeout: 5000, force: true }), amap({ name: "Bob" }), struct("URI", { host: "x" })]);
+    const out = await runElixir(`
+      [opts, map, uri] = :erlang.binary_to_term(Base.decode16!("${hex(bytes)}", case: :lower))
+      IO.inspect(opts)
+      IO.inspect(map)
+      IO.inspect(match?(%URI{host: "x"}, uri))
+    `);
+    expect(out.trim().split("\n")).toEqual(["[timeout: 5000, force: true]", '%{name: "Bob"}', "true"]);
   });
 });
 
