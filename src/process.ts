@@ -198,6 +198,64 @@ export class Process {
     });
   }
 
+  /**
+   * Starts a relay on `node`: a process that calls `m.f(...args)` and then
+   * forwards every message it receives to this process. `m.f` is meant to
+   * subscribe the relay somewhere, e.g. `Registry.register/3` or `:pg.join/3`;
+   * the atom `$self` in `args` stands for the relay's own pid. Resolves with
+   * what `m.f` returned once the call is done, so no message is missed after
+   * that. Fails with `RelayError` if `m.f` raises.
+   *
+   * The relay is linked to this process and monitors it: when this process
+   * exits, for any reason, the relay exits too and the subscription goes away
+   * with it; if the relay dies, this process gets the exit signal. `stop()` ends the relay and keeps
+   * this process running. No code needs to be deployed on `node`: the relay
+   * runs through `erl_eval`.
+   */
+  async relay(
+    node: string,
+    m: string,
+    f: string,
+    args: Term[] = [],
+    timeout = 5000,
+  ): Promise<{ pid: Pid; result: Term; stop: () => Promise<void> }> {
+    const ref = this.node.makeRef();
+    const bindings = [
+      tuple(atom("A"), args),
+      tuple(atom("F"), atom(f)),
+      tuple(atom("Js"), this.pid),
+      tuple(atom("M"), atom(m)),
+      tuple(atom("Ref"), ref),
+    ];
+    const exprs = await relayExprs(this.node, node);
+    const { pid } = await this.spawnOn(node, "erl_eval", "exprs", [exprs, bindings], { link: true });
+    const reply = (await this.receive(
+      (msg) =>
+        msg instanceof Tuple &&
+        ((msg.at(0) === RELAY && ref.equals(msg.at(1))) || (msg.at(0) === EXIT && pid.equals(msg.at(1)))),
+      timeout,
+    )) as Tuple;
+    // With trapExit a relay that died before reporting shows up as {:EXIT, pid, reason}.
+    if (reply.at(0) === EXIT) throw new RelayError(reply.at(2)!);
+    const [status, value] = (reply.at(2) as Tuple).elements;
+    if (status !== atom("ok")) throw new RelayError(value!);
+    const stop = async () => {
+      await this.unlink(pid);
+      await this.node.exit(pid, atom("kill"));
+    };
+    return { pid, result: value!, stop };
+  }
+
+  /**
+   * Subscribes this process to a Phoenix.PubSub topic on `node`:
+   * `self.subscribe(node, "Elixir.MyApp.PubSub", "orders")`. Broadcasts to the
+   * topic arrive in the mailbox as they are. A relay under the hood, see `relay`.
+   */
+  async subscribe(node: string, pubsub: string, topic: string): Promise<{ stop: () => Promise<void> }> {
+    const { stop } = await this.relay(node, "Elixir.Phoenix.PubSub", "subscribe", [atom(pubsub), topic]);
+    return { stop };
+  }
+
   /** The remote node answered a spawn request. Flags: 1 = linked, 2 = monitored. */
   spawnReply(reqId: Ref, flags: number, result: Term) {
     const pending = this.spawns.get(reqId.key);
@@ -288,6 +346,60 @@ export class Process {
       reject(new SpawnError(noconnection));
     }
   }
+}
+
+/** The subscribing call of a relay raised; `reason` is the Erlang exit reason. */
+export class RelayError extends Error {
+  constructor(readonly reason: Term) {
+    super(`relay call failed: ${format(reason)}`);
+  }
+}
+
+const RELAY = atom("$erlnode_relay");
+
+// Runs in erl_eval on the remote node with M, F, A, Js and Ref bound. Reports
+// the call's outcome to Js, then forwards everything it receives to Js until
+// Js goes away. The link alone is not enough: a normal exit of Js does not
+// end a linked process, so the relay also monitors Js.
+const RELAY_SOURCE = `
+Self = self(),
+Mon = erlang:monitor(process, Js),
+Args = [case X of '$self' -> Self; _ -> X end || X <- A],
+case catch erlang:apply(M, F, Args) of
+  {'EXIT', Reason} ->
+    Js ! {'$erlnode_relay', Ref, {error, Reason}};
+  Result ->
+    Js ! {'$erlnode_relay', Ref, {ok, Result}},
+    Loop = fun L() ->
+      receive
+        {'DOWN', Mon, process, _, _} -> ok;
+        Msg -> Js ! Msg, L()
+      end
+    end,
+    Loop()
+end.`;
+
+// Parsed RELAY_SOURCE per remote node. The node parses it itself, so the
+// abstract format always matches its OTP release.
+const relayCache = new WeakMap<ErlNode, Map<string, Promise<Term>>>();
+
+function relayExprs(node: ErlNode, remote: string): Promise<Term> {
+  let perNode = relayCache.get(node);
+  if (!perNode) relayCache.set(node, (perNode = new Map()));
+  let exprs = perNode.get(remote);
+  if (!exprs) {
+    exprs = (async () => {
+      const chars = Array.from(RELAY_SOURCE, (c) => c.charCodeAt(0));
+      const scanned = (await node.rpc(remote, "erl_scan", "string", [chars])) as Tuple;
+      if (scanned.at(0) !== atom("ok")) throw new Error(`erl_scan failed: ${format(scanned)}`);
+      const parsed = (await node.rpc(remote, "erl_parse", "parse_exprs", [scanned.at(1)!])) as Tuple;
+      if (parsed.at(0) !== atom("ok")) throw new Error(`erl_parse failed: ${format(parsed)}`);
+      return parsed.at(1)!;
+    })();
+    exprs.catch(() => perNode!.delete(remote));
+    perNode.set(remote, exprs);
+  }
+  return exprs;
 }
 
 /** The connection to `name`, or undefined if it cannot be established. */

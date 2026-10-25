@@ -74,6 +74,7 @@ The API follows Elixir:
 | `Process.monitor/1`, `Process.link/1` | `self.monitor(dest)`, `self.link(pid)` |
 | `Process.register/2`, `Process.whereis/1` | `self.register(name)`, `node.whereis(name)` |
 | `Process.flag(:trap_exit, true)` | `self.trapExit = true` |
+| `Phoenix.PubSub.subscribe/2` | `self.subscribe(node, pubsub, topic)` |
 | `exit/1`, `Process.exit/2` | `self.exit(reason)`, `node.exit(pid, reason)` |
 
 One node keeps any number of connections, outgoing and incoming.
@@ -110,6 +111,10 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
   target, so a missing or crashed process fails the call with `CallError`.
 - `erpc` (`:erpc.call`): runs the function in a new process on the remote
   node; exceptions come back as `ErpcError` with the Erlang class and reason.
+- `self.subscribe(node, pubsub, topic)` subscribes to Phoenix.PubSub;
+  `self.relay(node, m, f, args)` does the same for `Registry`, `:pg` or
+  anything else that registers the caller. Nothing is deployed on the
+  Elixir side.
 - `self.spawnOn(node, m, f, args, { link, monitor })` starts a process on
   the remote node (`spawn_request`). Spawn requests from BEAM to us are
   answered with `notsup`: the JS node cannot run Erlang code.
@@ -171,6 +176,39 @@ node.spawn(async (self) => {
 Messages travel over the connection the JS node opened. If Elixir has to
 connect first (we never connected, or the connection dropped), call
 `node.listen()` so the JS node accepts connections.
+
+### Subscribing to Phoenix.PubSub, Registry and :pg
+
+A JS process can subscribe to a Phoenix.PubSub topic of a running Elixir app,
+with no code added to the app:
+
+```ts
+node.spawn(async (self) => {
+  await self.subscribe("app@localhost", "Elixir.MyApp.PubSub", "orders");
+  for await (const event of self) {
+    console.log(event); // Phoenix.PubSub.broadcast(MyApp.PubSub, "orders", event)
+  }
+});
+```
+
+`subscribe` is built on `relay`, which works for anything that registers
+the calling process. `relay(node, m, f, args)` starts a process on `node`
+that calls `m.f(...args)` and then forwards every message it gets to the JS
+process. The atom `$self` in `args` stands for the relay's pid:
+
+```ts
+// Registry.register(MyApp.Registry, "key", nil)
+await self.relay(APP, "Elixir.Registry", "register", [atom("Elixir.MyApp.Registry"), "key", atom("nil")]);
+
+// :pg.join(:my_scope, "workers", relay_pid)
+await self.relay(APP, "pg", "join", [atom("my_scope"), "workers", atom("$self")]);
+```
+
+The relay runs through `erl_eval`, so nothing has to be deployed on the
+Elixir side. It is linked to the JS process and monitors it: when the JS
+process exits or the connection drops, the relay exits and the subscription
+is gone. If the relay dies, the JS process gets the exit signal. Both
+`relay` and `subscribe` return `stop()` to unsubscribe and keep the process.
 
 ### Answering GenServer.call and GenServer.cast
 
@@ -234,6 +272,8 @@ bun test
 ```
 
 Tests start real Elixir nodes, so `elixir` and `epmd` must be on the PATH.
+The Phoenix.PubSub test installs `phoenix_pubsub` with `Mix.install`, so its
+first run needs access to hex.pm.
 `ERLNODE_LONG=1 bun test` also runs a 3 minute keepalive test.
 
 `scripts/test-otp.sh` runs the suite against OTP 23 to 29 with nix

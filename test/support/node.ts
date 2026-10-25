@@ -7,7 +7,8 @@ export const COOKIE = "secret";
 // - `:echo` replies `{:echo, msg}` to `from` for every `{from, msg}` it gets;
 // - `Counter` is a GenServer, `:inc` bumps the counter and returns the new value;
 // - `Funs.adder/1` returns a closure, to pass funs back and forth;
-// - `Helpers` spawns processes for link and monitor tests.
+// - `Helpers` spawns processes for link and monitor tests and broadcasts
+//   through `TestRegistry` (duplicate keys) and the `:test_pg` scope.
 const SCRIPT = `
 defmodule Counter do
   use GenServer
@@ -49,6 +50,18 @@ defmodule Helpers do
     Enum.each(senders, &send(&1, :go))
   end
 
+  # Sends msg to everyone registered under key in TestRegistry / in pg group.
+  def registry_broadcast(key, msg) do
+    Registry.dispatch(TestRegistry, key, fn entries -> for {pid, _} <- entries, do: send(pid, msg) end)
+  end
+
+  def registry_count(key), do: length(Registry.lookup(TestRegistry, key))
+
+  def pg_broadcast(group, msg) do
+    for pid <- :pg.get_members(:test_pg, group), do: send(pid, msg)
+    :ok
+  end
+
   # Asks node to spawn a process and returns its spawn_reply.
   def spawn_on(node) do
     ref = :erlang.spawn_request(node, :erlang, :node, [])
@@ -82,6 +95,8 @@ defmodule Echo do
 end
 
 {:ok, _} = GenServer.start_link(Counter, 0, name: Counter)
+{:ok, _} = Registry.start_link(keys: :duplicate, name: TestRegistry)
+{:ok, _} = :pg.start_link(:test_pg)
 Process.register(spawn_link(&Echo.loop/0), :echo)
 IO.puts("READY")
 Process.sleep(:infinity)
@@ -93,16 +108,27 @@ export interface TestNode {
   stop(): Promise<void>;
 }
 
+// With `pubsub: true` the node also runs Phoenix.PubSub as `TestPubSub`.
+// Mix.install fetches phoenix_pubsub from hex the first time, then caches it.
+const PUBSUB = `
+Mix.install([{:phoenix_pubsub, "~> 2.1"}])
+{:ok, _} = Supervisor.start_link([{Phoenix.PubSub, name: TestPubSub}], strategy: :one_for_one)
+`;
+
 /** Starts an Elixir node `<sname>@localhost` and waits until it is ready. */
-export async function startNode(sname: string, opts: { cookie?: string; erl?: string } = {}): Promise<TestNode> {
+export async function startNode(
+  sname: string,
+  opts: { cookie?: string; erl?: string; pubsub?: boolean } = {},
+): Promise<TestNode> {
   const name = `${sname}@localhost`;
   const args = ["--sname", name, "--cookie", opts.cookie ?? COOKIE];
   if (opts.erl) args.push("--erl", opts.erl);
-  const proc = Bun.spawn(["elixir", ...args, "-e", SCRIPT], {
+  const script = (opts.pubsub ? PUBSUB : "") + SCRIPT;
+  const proc = Bun.spawn(["elixir", ...args, "-e", script], {
     stdout: "pipe",
     stderr: "inherit",
   });
-  await waitForLine(proc, "READY", 15_000);
+  await waitForLine(proc, "READY", opts.pubsub ? 60_000 : 15_000);
   return {
     name,
     async stop() {
