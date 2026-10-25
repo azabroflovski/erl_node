@@ -60,6 +60,10 @@ export class Tuple {
   at(i: number): Term | undefined {
     return this.elements[i];
   }
+  /** Lets a tuple be destructured: `const [tag, value] = t`. */
+  [Symbol.iterator](): Iterator<Term> {
+    return this.elements[Symbol.iterator]();
+  }
 }
 
 export const tuple = (...elements: Term[]): Tuple => new Tuple(...elements);

@@ -57,11 +57,11 @@ test("GenServer.call and GenServer.cast into a JS process (README example)", asy
     self.register("counter");
     let count = 0;
     for await (const msg of self) {
-      const [tag, a, b] = (msg as Tuple).elements;
+      const [tag, a, b] = msg as Tuple;
       if (tag === atom("$gen_call") && b === atom("inc")) {
         await listener.reply(a!, ++count);
       } else if (tag === atom("$gen_cast")) {
-        const [op, n] = (a as Tuple).elements;
+        const [op, n] = a as Tuple;
         if (op === atom("add")) count += n as number;
       }
     }

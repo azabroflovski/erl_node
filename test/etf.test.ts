@@ -131,6 +131,14 @@ describe("decode", () => {
     expect(at("2 ** 2100")).toBe(2n ** 2100n);
   });
 
+  test("tuples destructure like arrays", () => {
+    const [tag, value, missing] = tuple(atom("set"), 42);
+    expect(tag).toBe(atom("set"));
+    expect(value).toBe(42);
+    expect(missing).toBeUndefined();
+    expect([...tuple(1, 2)]).toEqual([1, 2]);
+  });
+
   test("old latin-1 atoms", () => {
     // ATOM_EXT and SMALL_ATOM_EXT are no longer produced by OTP 26+, so the bytes are written by hand.
     expect(decode(new Uint8Array([131, 100, 0, 2, 111, 107]))).toBe(atom("ok"));

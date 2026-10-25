@@ -95,7 +95,10 @@ const off = node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => {
 let price = 0;
 node.serve("prices", {
   call: (req) => price,               // the return value is the reply
-  cast: (req) => { price = (req as Tuple).at(1) as number; },
+  cast: (req) => {
+    const [op, value] = req as Tuple;  // GenServer.cast(pid, {:set, 42})
+    if (op === atom("set")) price = value as number;
+  },
   info: (msg) => console.log(msg),    // any other message
 });
 
@@ -127,7 +130,7 @@ node.spawn(async (self) => { /* ... */ }, { restart: { delay: 1000 } });
 | binary | `Uint8Array` (`binaryToString` for text) | `Uint8Array`, `string` |
 | list | array | array |
 | charlist | array of numbers | array of numbers |
-| tuple | `Tuple` | `Tuple` (`tuple(...)`) |
+| tuple | `Tuple` (`t.at(i)`, `const [a, b] = t`) | `Tuple` (`tuple(...)`) |
 | map | `Map` | `Map`, plain object (keys stay strings) |
 | improper list | `ImproperList` | `ImproperList` |
 | bitstring | `BitBinary` (bytes and bit count of the last byte) | `BitBinary` |
@@ -315,11 +318,11 @@ node.spawn(async (self) => {
   self.register("counter");
   let count = 0;
   for await (const msg of self) {
-    const [tag, a, b] = (msg as Tuple).elements;
+    const [tag, a, b] = msg as Tuple;
     if (tag === atom("$gen_call") && b === atom("inc")) {
       await node.reply(a!, ++count);
     } else if (tag === atom("$gen_cast")) {
-      const [op, n] = (a as Tuple).elements;
+      const [op, n] = a as Tuple;
       if (op === atom("add")) count += n as number;
     }
   }
