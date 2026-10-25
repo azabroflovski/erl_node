@@ -15,34 +15,55 @@ as `:echo` and a GenServer registered as `Counter`, like the one in
 iex --sname app@localhost --cookie secret
 ```
 
-Connect to it:
+Talk to it:
 
 ```ts
-import { atom, connect, tuple } from "erlnode";
+import { atom, start, tuple } from "erlnode";
 
-const node = await connect("app@localhost", { name: "js@localhost", cookie: "secret" });
+const APP = "app@localhost";
+const node = start({ name: "js@localhost", cookie: "secret" });
 
-// Send to a registered process.
-await node.send("echo", ["hello", 42]);
+// Optional: connections open on first use, connect() just checks early.
+await node.connect(APP);
 
-// GenServer.call. Elixir module names need the "Elixir." prefix.
-await node.call("app@localhost", "Elixir.Counter", atom("inc"));
+// send({:echo, :"app@localhost"}, msg)
+await node.send(["echo", APP], ["hello", 42]);
+
+// GenServer.call({Counter, :"app@localhost"}, :inc).
+// Elixir module names need the "Elixir." prefix.
+await node.call(["Elixir.Counter", APP], atom("inc"));
 
 // :rpc.call and :erpc.call
-await node.rpc("app@localhost", "erlang", "node"); // atom("app@localhost")
-await node.erpc("app@localhost", "erlang", "node"); // same, in a new remote process
+await node.rpc(APP, "erlang", "node"); // atom("app@localhost")
+await node.erpc(APP, "erlang", "node"); // same, in a new remote process
 
 // A mailbox has its own pid, so remote processes can reply to it.
 const mb = node.spawnMailbox();
-await node.send("echo", tuple(mb.pid, "ping"));
+await mb.send(["echo", APP], tuple(mb.pid, "ping"));
 const reply = await mb.receive(undefined, 5000);
 
 // A {:DOWN, ref, :process, object, reason} message arrives when :echo exits.
-const ref = await mb.monitor("echo");
+const ref = await mb.monitor(["echo", APP]);
 mb.demonitor(ref);
 
 await node.close();
 ```
+
+The API follows Elixir:
+
+| Elixir | erlnode |
+|---|---|
+| `Node.start/1` | `start({ name, cookie })` |
+| `Node.connect/1`, `Node.disconnect/1`, `Node.list/0` | `node.connect(n)`, `node.disconnect(n)`, `node.list()` |
+| `send(pid, msg)` | `node.send(pid, msg)` |
+| `send({name, node}, msg)` | `node.send([name, node], msg)` |
+| `send(name, msg)` for a local name | `node.send(name, msg)` |
+| `GenServer.call(dest, req, timeout)` | `node.call(dest, req, timeout)` |
+| `:rpc.call/5`, `:erpc.call/5` | `node.rpc(...)`, `node.erpc(...)` |
+| `Process.monitor/1`, `Process.link/1` | `mb.monitor(dest)`, `mb.link(pid)` |
+| `Process.register/2` | `mb.register(name)` |
+
+One node keeps any number of connections, outgoing and incoming.
 
 ## Terms
 
@@ -67,7 +88,7 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 ## What works
 
 - EPMD lookup, handshake version 6 (OTP 23+), ticks.
-- `send` to a pid or a registered name.
+- `send` to a pid, a local name or `[name, node]`.
 - Mailboxes with `receive(match, timeout)`.
 - `call` (the gen_server protocol) and `rpc` (through `rex`).
   Output that the remote function writes is discarded. `call` monitors the
@@ -82,7 +103,6 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
   deliver `{:DOWN, ref, :process, object, reason}`. `mailbox.close(reason)`
   sends exit signals to linked and monitoring processes. When a connection
   drops, links and monitors over it fire with `:noconnection`.
-
 - Incoming connections after `node.listen()`: the node registers in the local
   EPMD and accepts handshakes. Mailboxes can be registered under a name
   (`mb.register("inbox")`), so Erlang code can use `send({:inbox, :"js@host"}, msg)`,
@@ -91,6 +111,8 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 The node is hidden, so it shows up in `Node.list(:hidden)` and not in
 `Node.list()`. Without `listen()` it only makes outgoing connections.
 `listen()` binds all interfaces unless `host` is given, like `erl` does.
+
+Also:
 
 - Fragmented messages (`DFLAG_FRAGMENTS`): BEAM sends large messages in
   64 KB pieces, possibly interleaved between senders; they are put back
@@ -101,9 +123,9 @@ Not supported yet: TLS distribution, the atom cache.
 ## Receiving connections
 
 ```ts
-import { ErlNode } from "erlnode";
+import { start } from "erlnode";
 
-const node = new ErlNode({ name: "js@localhost", cookie: "secret" });
+const node = start({ name: "js@localhost", cookie: "secret" });
 await node.listen();
 
 const inbox = node.spawnMailbox();

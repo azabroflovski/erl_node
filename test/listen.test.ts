@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, connect, ErlNode, type Term, Tuple, tuple } from "../src/index.ts";
+import { atom, type ErlNode, start, type Term, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 // `listener` only accepts connections, it never connects anywhere itself.
@@ -15,9 +15,10 @@ const rpc = (m: string, f: string, args: Term[] = []) => driver.rpc(remote.name,
 
 beforeAll(async () => {
   remote = await startNode("lis_test");
-  listener = new ErlNode({ name: LISTENER, cookie: COOKIE });
+  listener = start({ name: LISTENER, cookie: COOKIE });
   await listener.listen({ host: "127.0.0.1" });
-  driver = await connect(remote.name, { name: "lis_driver@localhost", cookie: COOKIE });
+  driver = start({ name: "lis_driver@localhost", cookie: COOKIE });
+  await driver.connect(remote.name);
 });
 
 afterAll(async () => {
@@ -94,7 +95,7 @@ test("register rejects a taken name", () => {
 });
 
 test("close unregisters from EPMD", async () => {
-  const n = new ErlNode({ name: "lis_tmp@localhost", cookie: COOKIE });
+  const n = start({ name: "lis_tmp@localhost", cookie: COOKIE });
   await n.listen({ host: "127.0.0.1" });
   await n.close();
   await Bun.sleep(100);
@@ -104,13 +105,13 @@ test("close unregisters from EPMD", async () => {
 
 test("simultaneous connect between two listening nodes", async () => {
   for (let i = 0; i < 5; i++) {
-    const a = new ErlNode({ name: `sim_a${i}@localhost`, cookie: COOKIE });
-    const b = new ErlNode({ name: `sim_b${i}@localhost`, cookie: COOKIE });
+    const a = start({ name: `sim_a${i}@localhost`, cookie: COOKIE });
+    const b = start({ name: `sim_b${i}@localhost`, cookie: COOKIE });
     await a.listen({ host: "127.0.0.1" });
     await b.listen({ host: "127.0.0.1" });
-    const [ab, ba] = await Promise.all([a.connect(b.name.name), b.connect(a.name.name)]);
-    expect(ab.peerName).toBe(b.name.name);
-    expect(ba.peerName).toBe(a.name.name);
+    await Promise.all([a.connect(b.name.name), b.connect(a.name.name)]);
+    expect(a.list()).toEqual([b.name.name]);
+    expect(b.list()).toEqual([a.name.name]);
     const mb = b.spawnMailbox();
     await a.send(mb.pid, atom("over_one_connection"));
     expect(await mb.receive(undefined, 2000)).toBe(atom("over_one_connection"));

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, connect, type ErlNode, ErlNode as Node, Pid, Ref, TimeoutError, Tuple, tuple } from "../src/index.ts";
+import { atom, type ErlNode, Pid, Ref, start, TimeoutError, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
@@ -7,7 +7,8 @@ let node: ErlNode;
 
 beforeAll(async () => {
   remote = await startNode("mon_test");
-  node = await connect(remote.name, { name: "mon_js@localhost", cookie: COOKIE });
+  node = start({ name: "mon_js@localhost", cookie: COOKIE });
+  await node.connect(remote.name);
 });
 
 afterAll(async () => {
@@ -32,7 +33,7 @@ test("monitor a registered name", async () => {
   const mb = node.spawnMailbox();
   const pid = await sleeper();
   await node.rpc(remote.name, "erlang", "register", [atom("named_sleeper"), pid]);
-  const ref = await mb.monitor("named_sleeper");
+  const ref = await mb.monitor(["named_sleeper", remote.name]);
   await kill(pid);
   const object = tuple(atom("named_sleeper"), atom(remote.name));
   expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("DOWN"), ref, atom("process"), object, atom("boom")));
@@ -41,7 +42,7 @@ test("monitor a registered name", async () => {
 
 test("monitor a missing process", async () => {
   const mb = node.spawnMailbox();
-  const ref = await mb.monitor("nobody");
+  const ref = await mb.monitor(["nobody", remote.name]);
   const down = (await mb.receive(undefined, 2000)) as Tuple;
   expect(down.at(1)).toEqual(ref);
   expect(down.at(4)).toBe(atom("noproc"));
@@ -149,12 +150,12 @@ test("exit/2 from the remote side arrives as a message", async () => {
 
 test("lost connection: noconnection for monitors and links, call fails", async () => {
   const other = await startNode("mon_other");
-  const n = new Node({ name: "mon_js2@localhost", cookie: COOKIE });
+  const n = start({ name: "mon_js2@localhost", cookie: COOKIE });
   const mb = n.spawnMailbox();
   const pid = (await n.rpc(other.name, "Elixir.Helpers", "sleeper")) as Pid;
   const ref = await mb.monitor(pid);
   await mb.link(pid);
-  const pending = n.call(other.name, "echo", atom("never_replied"), 10_000).catch((e) => e);
+  const pending = n.call(["echo", other.name], atom("never_replied"), 10_000).catch((e) => e);
   await Bun.sleep(100);
   await other.stop();
   expect(await mb.receive((m) => m instanceof Tuple && m.at(0) === atom("DOWN"), 5000)).toEqual(

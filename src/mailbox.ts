@@ -1,7 +1,8 @@
 import { OP } from "./connection.ts";
 import { DFLAG } from "./handshake.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
-import type { ErlNode } from "./node.ts";
+import type { Connection } from "./connection.ts";
+import type { Dest, ErlNode } from "./node.ts";
 
 export class TimeoutError extends Error {}
 
@@ -99,8 +100,8 @@ export class Mailbox {
   }
 
   /** Sends `msg` with this mailbox's pid as the sender. */
-  send(to: Pid | string, msg: Term, node?: string): Promise<void> {
-    return this.node.send(to, msg, { node, from: this.pid });
+  send(to: Dest, msg: Term): Promise<void> {
+    return this.node.send(to, msg, this.pid);
   }
 
   /** Links to `pid`. If its node cannot be reached, `{:EXIT, pid, :noconnection}` arrives. */
@@ -109,7 +110,7 @@ export class Mailbox {
     const existing = this.links.get(pid.key);
     if (existing && existing.unlinking === undefined) return;
     this.links.set(pid.key, { pid });
-    const conn = await this.node.connect(pid.node.name).catch(() => null);
+    const conn = await reach(this.node, pid.node.name);
     if (!conn) {
       this.links.delete(pid.key);
       this.deliver(tuple(EXIT, pid, atom("noconnection")));
@@ -132,16 +133,15 @@ export class Mailbox {
   }
 
   /**
-   * Monitors a pid, or a name registered on `node` (default: the node passed
-   * to `connect`). Resolves with the monitor reference.
+   * Monitors a pid or `[name, node]`, like `Process.monitor/1`. Resolves with
+   * the monitor reference.
    */
-  async monitor(target: Pid | string, node?: string): Promise<Ref> {
+  async monitor(target: Pid | [name: string, node: string]): Promise<Ref> {
     if (this.closed) throw new Error("mailbox closed");
     const ref = this.node.makeRef();
-    const proc = typeof target === "string" ? atom(target) : target;
-    const nodeName = proc instanceof Pid ? proc.node.name : (node ?? this.node.remote);
-    if (!nodeName) throw new Error("no node given for a registered name");
-    const conn = await this.node.connect(nodeName).catch(() => null);
+    const proc = target instanceof Pid ? target : atom(target[0]);
+    const nodeName = target instanceof Pid ? target.node.name : target[1];
+    const conn = await reach(this.node, nodeName);
     if (!conn) {
       this.deliver(tuple(DOWN, ref, atom("process"), downObject(proc, nodeName), atom("noconnection")));
       return ref;
@@ -165,7 +165,7 @@ export class Mailbox {
     opts: { link?: boolean; monitor?: boolean } = {},
   ): Promise<Spawned> {
     if (this.closed) throw new Error("mailbox closed");
-    const conn = await this.node.connect(node).catch(() => null);
+    const conn = await reach(this.node, node);
     if (!conn) throw new SpawnError(atom("noconnection"));
     if (!(conn.peerFlags & DFLAG.SPAWN)) throw new SpawnError(atom("notsup"));
     const reqId = this.node.makeRef();
@@ -261,6 +261,16 @@ export class Mailbox {
       reject(new SpawnError(noconnection));
     }
   }
+}
+
+/** The connection to `name`, or undefined if it cannot be established. */
+async function reach(node: ErlNode, name: string): Promise<Connection | undefined> {
+  try {
+    await node.connect(name);
+  } catch {
+    return undefined;
+  }
+  return node.connection(name);
 }
 
 function downObject(target: Pid | Atom, node: string): Term {

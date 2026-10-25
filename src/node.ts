@@ -7,6 +7,12 @@ import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
 import { isDown, Mailbox, SpawnError } from "./mailbox.ts";
 
+/**
+ * Where a message goes, as in Elixir's `send/2`: a pid, a name registered on
+ * this node, or `[name, node]` for a name registered on another node.
+ */
+export type Dest = Pid | string | [name: string, node: string];
+
 export interface NodeOptions {
   /** Our node name, e.g. `js@localhost`. */
   name: string;
@@ -46,8 +52,6 @@ const EXIT = atom("EXIT");
 export class ErlNode {
   readonly name: Atom;
   readonly creation = randomInt(4, 2 ** 32);
-  /** Default remote node for registered names. */
-  remote?: string;
   /** Sender pid for messages sent without an explicit mailbox. */
   readonly pid: Pid;
 
@@ -70,8 +74,31 @@ export class ErlNode {
     this.pid = this.makePid();
   }
 
-  /** Connects to `remote` (`name@host`), reusing an existing connection. */
-  connect(remote: string): Promise<Connection> {
+  /**
+   * Connects to `remote` (`name@host`), like `Node.connect/1`. Optional:
+   * `send`, `call` and the rest connect on first use. Connecting to a node
+   * we are already connected to does nothing.
+   */
+  async connect(remote: string): Promise<void> {
+    await this.dial(remote);
+  }
+
+  /** Closes the connection to `remote`, like `Node.disconnect/1`. */
+  disconnect(remote: string) {
+    this.established.get(remote)?.close();
+  }
+
+  /** Nodes we are connected to, like `Node.list(:connected)`. */
+  list(): string[] {
+    return [...this.established.keys()];
+  }
+
+  /** The established connection to `remote`, if there is one. */
+  connection(remote: string): Connection | undefined {
+    return this.established.get(remote);
+  }
+
+  private dial(remote: string): Promise<Connection> {
     let conn = this.connections.get(remote);
     if (!conn) {
       conn = this.openConnection(remote);
@@ -79,11 +106,6 @@ export class ErlNode {
       conn.catch(() => this.connections.delete(remote));
     }
     return conn;
-  }
-
-  /** The established connection to `remote`, if there is one. */
-  connection(remote: string): Connection | undefined {
-    return this.established.get(remote);
   }
 
   private async openConnection(remote: string): Promise<Connection> {
@@ -321,43 +343,49 @@ export class ErlNode {
   }
 
   /**
-   * Sends `msg` to a pid, or to a process registered under `to` on
-   * `opts.node` (default: the node passed to `connect`).
-   * Resolves once the message is written to the socket.
+   * Sends `msg` to `to`, like Elixir's `send/2`. `from` is the sender pid the
+   * remote side sees. Resolves once the message is written to the socket.
+   * Sending to an unregistered local name throws, as in Erlang; messages to
+   * a missing name on another node are dropped.
    */
-  async send(to: Pid | string, msg: Term, opts: { node?: string; from?: Pid } = {}): Promise<void> {
-    const from = opts.from ?? this.pid;
+  async send(to: Dest, msg: Term, from: Pid = this.pid): Promise<void> {
+    if (typeof to === "string") {
+      const mb = this.names.get(to);
+      if (!mb) throw new Error(`no process registered as ${to}`);
+      return mb.deliver(msg);
+    }
     if (to instanceof Pid) {
-      const conn = await this.connect(to.node.name);
+      if (to.node === this.name) return this.local(to)?.deliver(msg);
+      const conn = await this.dial(to.node.name);
       if (conn.peerFlags & DFLAG.SEND_SENDER) conn.send(tuple(OP.SEND_SENDER, from, to), msg);
       else conn.send(tuple(OP.SEND, atom(""), to), msg);
       return;
     }
-    const node = opts.node ?? this.remote;
-    if (!node) throw new Error("no node given for a registered name");
-    const conn = await this.connect(node);
-    conn.send(tuple(OP.REG_SEND, from, atom(""), atom(to)), msg);
+    const [name, node] = to;
+    if (node === this.name.name) return this.names.get(name)?.deliver(msg);
+    const conn = await this.dial(node);
+    conn.send(tuple(OP.REG_SEND, from, atom(""), atom(name)), msg);
   }
 
   /**
-   * `GenServer.call(to, request, timeout)` against a process on `node`.
-   * `to` is a registered name (Elixir modules need the `Elixir.` prefix) or a pid.
+   * `GenServer.call(to, request, timeout)`. `to` is a pid or `[name, node]`
+   * (Elixir modules need the `Elixir.` prefix: `["Elixir.Counter", node]`).
    * Fails with `CallError` if the process does not exist, exits before
    * replying or its node disconnects, and with `TimeoutError` on timeout.
    */
-  async call(node: string, to: Pid | string, request: Term, timeout = 5000): Promise<Term> {
+  async call(to: Pid | [name: string, node: string], request: Term, timeout = 5000): Promise<Term> {
     const mb = this.spawnMailbox();
     try {
       // Like gen:call, the monitor reference doubles as the reply tag.
-      const ref = await mb.monitor(to, node);
-      await mb.send(to, tuple(atom("$gen_call"), tuple(mb.pid, ref), request), node);
+      const ref = await mb.monitor(to);
+      await mb.send(to, tuple(atom("$gen_call"), tuple(mb.pid, ref), request));
       const msg = (await mb.receive(
         (m) => isDown(m, ref) || (m instanceof Tuple && m.length === 2 && ref.equals(m.at(0))),
         timeout,
       )) as Tuple;
       if (msg.length === 2) return msg.at(1)!;
       const reason = msg.at(4)!;
-      const target = typeof to === "string" ? `${to} on ${node}` : String(to);
+      const target = to instanceof Pid ? String(to) : `${to[0]} on ${to[1]}`;
       throw new CallError(`call to ${target} failed: ${format(reason)}`, reason);
     } finally {
       mb.close();
@@ -370,7 +398,7 @@ export class ErlNode {
    */
   rpc(node: string, m: string, f: string, args: Term[] = [], timeout = 5000): Promise<Term> {
     const gl = this.groupLeaderPid();
-    return this.call(node, "rex", tuple(atom("call"), atom(m), atom(f), args, gl), timeout);
+    return this.call(["rex", node], tuple(atom("call"), atom(m), atom(f), args, gl), timeout);
   }
 
   /**
@@ -394,7 +422,7 @@ export class ErlNode {
         const [, from, replyAs, req] = msg.elements;
         if (!(from instanceof Pid)) continue;
         const reply = isOutputRequest(req!) ? atom("ok") : tuple(atom("error"), atom("enotsup"));
-        void this.send(from, tuple(atom("io_reply"), replyAs!, reply), { from: gl.pid }).catch(() => {});
+        void this.send(from, tuple(atom("io_reply"), replyAs!, reply), gl.pid).catch(() => {});
       }
     };
     void loop();
@@ -454,10 +482,10 @@ function isOutputRequest(req: Term): boolean {
   return false;
 }
 
-/** Creates a node and connects it to `remote`. */
-export async function connect(remote: string, opts: NodeOptions): Promise<ErlNode> {
-  const node = new ErlNode(opts);
-  node.remote = remote;
-  await node.connect(remote);
-  return node;
+/**
+ * Starts a node named `name` (`name@host`), like `Node.start/1`. It makes no
+ * connections until it needs them; call `listen()` to accept them as well.
+ */
+export function start(opts: NodeOptions): ErlNode {
+  return new ErlNode(opts);
 }

@@ -2,11 +2,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   atom,
   binaryToString,
-  connect,
   type ErlNode,
   ErpcError,
   Pid,
   SpawnError,
+  start,
   TimeoutError,
   tuple,
 } from "../src/index.ts";
@@ -17,7 +17,8 @@ let node: ErlNode;
 
 beforeAll(async () => {
   remote = await startNode("spawn_test");
-  node = await connect(remote.name, { name: "spawn_js@localhost", cookie: COOKIE });
+  node = start({ name: "spawn_js@localhost", cookie: COOKIE });
+  await node.connect(remote.name);
 });
 
 afterAll(async () => {

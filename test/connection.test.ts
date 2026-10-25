@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, ErlNode } from "../src/index.ts";
+import { atom, start } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 // net_ticktime 4 makes the remote tick every second and drop a silent
@@ -18,8 +18,9 @@ afterAll(() => remote.stop());
 test(
   "connection survives ticks",
   async () => {
-    const node = new ErlNode({ name: "conn_js@localhost", cookie: COOKIE });
-    const conn = await node.connect(remote.name);
+    const node = start({ name: "conn_js@localhost", cookie: COOKIE });
+    await node.connect(remote.name);
+    const conn = node.connection(remote.name)!;
     expect(await node.rpc(remote.name, "net_kernel", "get_net_ticktime")).toBe(4);
     let lost: Error | undefined;
     conn.done.then((err) => (lost = err));
@@ -36,8 +37,9 @@ test.skipIf(!process.env.ERLNODE_LONG)(
   async () => {
     const slow = await startNode("conn_long");
     try {
-      const node = new ErlNode({ name: "conn_long_js@localhost", cookie: COOKIE });
-      const conn = await node.connect(slow.name);
+      const node = start({ name: "conn_long_js@localhost", cookie: COOKIE });
+      await node.connect(slow.name);
+      const conn = node.connection(slow.name)!;
       let lost: Error | undefined;
       conn.done.then((err) => (lost = err));
       await Bun.sleep(180_000);

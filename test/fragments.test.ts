@@ -3,7 +3,7 @@ import { createServer, connect as tcpConnect, type Socket } from "node:net";
 import { Connection } from "../src/connection.ts";
 import { FrameReader } from "../src/framing.ts";
 import { DFLAG } from "../src/handshake.ts";
-import { atom, connect, type ErlNode, type Term, Tuple, tuple } from "../src/index.ts";
+import { atom, type ErlNode, start, type Term, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
@@ -11,7 +11,8 @@ let node: ErlNode;
 
 beforeAll(async () => {
   remote = await startNode("frag_test");
-  node = await connect(remote.name, { name: "frag_js@localhost", cookie: COOKIE });
+  node = start({ name: "frag_js@localhost", cookie: COOKIE });
+  await node.connect(remote.name);
 });
 
 afterAll(async () => {
@@ -22,7 +23,7 @@ afterAll(async () => {
 const bytes = (n: number, fill: number) => new Uint8Array(n).fill(fill);
 
 test("BEAM negotiates fragments", async () => {
-  expect((await node.connect(remote.name)).fragmented).toBe(true);
+  expect(node.connection(remote.name)!.fragmented).toBe(true);
 });
 
 test("large message from BEAM arrives in fragments and is reassembled", async () => {
@@ -33,7 +34,7 @@ test("large message from BEAM arrives in fragments and is reassembled", async ()
 test("large message to BEAM", async () => {
   const mb = node.spawnMailbox();
   const big = [bytes(300_000, 1), atom("tail"), Array.from({ length: 50_000 }, (_, i) => i)];
-  await node.send("echo", tuple(mb.pid, big));
+  await node.send(["echo", remote.name], tuple(mb.pid, big));
   expect(await mb.receive(undefined, 5000)).toEqual(tuple(atom("echo"), big));
   expect(await node.rpc(remote.name, "erlang", "byte_size", [bytes(1_000_000, 3)])).toBe(1_000_000);
   mb.close();

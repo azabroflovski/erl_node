@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { atom, binaryToString, CallError, connect, type ErlNode, Fun, Pid, TimeoutError, Tuple, tuple } from "../src/index.ts";
+import { atom, binaryToString, CallError, type ErlNode, Fun, Pid, start, TimeoutError, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
@@ -7,7 +7,8 @@ let node: ErlNode;
 
 beforeAll(async () => {
   remote = await startNode("app_test");
-  node = await connect(remote.name, { name: "js_test@localhost", cookie: COOKIE });
+  node = start({ name: "js_test@localhost", cookie: COOKIE });
+  await node.connect(remote.name);
 });
 
 afterAll(async () => {
@@ -17,7 +18,7 @@ afterAll(async () => {
 
 test("send to a registered name, reply lands in the mailbox", async () => {
   const mb = node.spawnMailbox();
-  await node.send("echo", tuple(mb.pid, ["hello", 42]));
+  await node.send(["echo", remote.name], tuple(mb.pid, ["hello", 42]));
   const reply = (await mb.receive(undefined, 2000)) as Tuple;
   expect(reply.at(0)).toBe(atom("echo"));
   const [hello, n] = reply.at(1) as [Uint8Array, number];
@@ -37,8 +38,8 @@ test("send to a pid", async () => {
 
 test("receive with a pattern skips other messages", async () => {
   const mb = node.spawnMailbox();
-  await node.send("echo", tuple(mb.pid, 1));
-  await node.send("echo", tuple(mb.pid, 2));
+  await node.send(["echo", remote.name], tuple(mb.pid, 1));
+  await node.send(["echo", remote.name], tuple(mb.pid, 2));
   const second = await mb.receive((m) => m instanceof Tuple && m.at(1) === 2, 2000);
   expect((second as Tuple).at(1)).toBe(2);
   expect(((await mb.receive(undefined, 2000)) as Tuple).at(1)).toBe(1);
@@ -47,24 +48,24 @@ test("receive with a pattern skips other messages", async () => {
 });
 
 test("GenServer.call", async () => {
-  expect(await node.call(remote.name, "Elixir.Counter", atom("inc"))).toBe(1);
-  expect(await node.call(remote.name, "Elixir.Counter", atom("inc"))).toBe(2);
-  expect(await node.call(remote.name, "Elixir.Counter", atom("get"))).toBe(2);
+  expect(await node.call(["Elixir.Counter", remote.name], atom("inc"))).toBe(1);
+  expect(await node.call(["Elixir.Counter", remote.name], atom("inc"))).toBe(2);
+  expect(await node.call(["Elixir.Counter", remote.name], atom("get"))).toBe(2);
 });
 
 test("call to a missing name fails with noproc", async () => {
-  const err = await node.call(remote.name, "nobody", atom("x")).catch((e) => e);
+  const err = await node.call(["nobody", remote.name], atom("x")).catch((e) => e);
   expect(err).toBeInstanceOf(CallError);
   expect(err.reason).toBe(atom("noproc"));
 });
 
 test("call that gets no reply times out", async () => {
-  await expect(node.call(remote.name, "echo", atom("x"), 200)).rejects.toBeInstanceOf(TimeoutError);
+  await expect(node.call(["echo", remote.name], atom("x"), 200)).rejects.toBeInstanceOf(TimeoutError);
 });
 
 test("call to a process that exits before replying", async () => {
   const started = (await node.rpc(remote.name, "Elixir.GenServer", "start", [atom("Elixir.Counter"), 0])) as Tuple;
-  const err = await node.call(remote.name, started.at(1) as Pid, atom("stop")).catch((e) => e);
+  const err = await node.call(started.at(1) as Pid, atom("stop")).catch((e) => e);
   expect(err).toBeInstanceOf(CallError);
   expect(err.reason).toBe(atom("bye"));
 });
@@ -89,4 +90,30 @@ test("a fun from the remote node can be sent back and called there", async () =>
 
 test(":rpc.call that prints does not hang", async () => {
   expect(await node.rpc(remote.name, "Elixir.IO", "puts", ["from rpc"])).toBe(atom("ok"));
+});
+
+test("list and disconnect", async () => {
+  const other = start({ name: "js_list@localhost", cookie: COOKIE });
+  expect(other.list()).toEqual([]);
+  await other.connect(remote.name);
+  await other.connect(remote.name); // already connected: no-op
+  expect(other.list()).toEqual([remote.name]);
+  other.disconnect(remote.name);
+  await Bun.sleep(50);
+  expect(other.list()).toEqual([]);
+  // Connects again on first use.
+  expect(await other.rpc(remote.name, "erlang", "node")).toBe(atom(remote.name));
+  expect(other.list()).toEqual([remote.name]);
+  await other.close();
+});
+
+test("local sends", async () => {
+  const mb = node.spawnMailbox();
+  mb.register("local_inbox");
+  await node.send("local_inbox", 1);
+  await node.send(["local_inbox", node.name.name], 2);
+  await node.send(mb.pid, 3);
+  expect([await mb.receive(), await mb.receive(), await mb.receive()]).toEqual([1, 2, 3]);
+  mb.close();
+  await expect(node.send("local_inbox", 4)).rejects.toThrow("no process registered");
 });
