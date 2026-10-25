@@ -177,8 +177,9 @@ export const float = (value: number): Float => new Float(value);
  *
  * Encoding: safe integers become integers, other numbers become floats
  * (use `float()` to send `1.0`, `bigint` for exact large integers).
- * Strings go out as UTF-8 binaries, plain objects as maps with atom keys,
- * `null` as the atom `nil`.
+ * Strings go out as UTF-8 binaries, plain objects as maps with string keys
+ * (atoms are never created implicitly; use a `Map` with `atom()` keys for
+ * atom keys), `null` as the atom `nil`.
  */
 export type Term =
   | null
@@ -380,7 +381,7 @@ function write(w: Writer, t: Term): void {
     w.u8(MAP_EXT);
     w.u32(entries.length);
     for (const [k, v] of entries) {
-      writeAtom(w, k);
+      writeBinary(w, utf8.encode(k));
       write(w, v);
     }
   } else {
@@ -669,7 +670,7 @@ export function format(t: Term): string {
  * - pids, references, ports, funs and bitstrings are kept as they are.
  *
  * `encode(toJS(term))` gives back an equal term except that tuples come
- * back as lists, atoms as binaries and object keys as atoms.
+ * back as lists and atoms as binaries.
  */
 export function toJS(t: Term): unknown {
   if (t === null || typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return t;

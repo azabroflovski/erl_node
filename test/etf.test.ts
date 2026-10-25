@@ -149,7 +149,7 @@ describe("encode matches Elixir", () => {
       encode(tuple(atom("ok"), "hi", float(1), { a: 1 }, new Map([["k", [atom("x")]]]), false, -(2n ** 70n))),
     );
     const theirs = await runElixir(
-      `IO.puts(Base.encode16(:erlang.term_to_binary({:ok, "hi", 1.0, %{a: 1}, %{"k" => [:x]}, false, -(2 ** 70)}, minor_version: 2), case: :lower))`,
+      `IO.puts(Base.encode16(:erlang.term_to_binary({:ok, "hi", 1.0, %{"a" => 1}, %{"k" => [:x]}, false, -(2 ** 70)}, minor_version: 2), case: :lower))`,
     );
     expect(ours).toBe(theirs.trim());
   });
@@ -165,7 +165,13 @@ describe("encode matches Elixir", () => {
   test("null is nil", async () => {
     expect(encode(null)).toEqual(encode(atom("nil")));
     const out = await runElixir(`IO.inspect(:erlang.binary_to_term(Base.decode16!("${hex(encode({ a: null }))}", case: :lower)))`);
-    expect(out.trim()).toBe("%{a: nil}");
+    expect(out.trim()).toBe('%{"a" => nil}');
+  });
+
+  test("object keys become strings, atom keys need a Map with atom()", async () => {
+    const bytes = encode([{ name: "Bob", nested: { ok: true } }, new Map([[atom("name"), "Bob"]])]);
+    const out = await runElixir(`IO.inspect(:erlang.binary_to_term(Base.decode16!("${hex(bytes)}", case: :lower)))`);
+    expect(out.trim()).toBe('[%{"name" => "Bob", "nested" => %{"ok" => true}}, %{name: "Bob"}]');
   });
 
   test("rejects what it cannot encode", () => {

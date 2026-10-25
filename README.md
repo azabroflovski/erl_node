@@ -90,7 +90,7 @@ One node keeps any number of connections, outgoing and incoming.
 | list | array | array |
 | charlist | array of numbers | array of numbers |
 | tuple | `Tuple` | `Tuple` (`tuple(...)`) |
-| map | `Map` | `Map`, plain object (keys become atoms) |
+| map | `Map` | `Map`, plain object (keys stay strings) |
 | improper list | `ImproperList` | `ImproperList` |
 | bitstring | `BitBinary` (bytes and bit count of the last byte) | `BitBinary` |
 | `&m.f/a` | `Export` | `Export` |
@@ -99,6 +99,16 @@ One node keeps any number of connections, outgoing and incoming.
 
 Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 `null` is encoded as `nil`.
+
+Nothing from JS becomes an atom unless you ask for it: object keys stay
+strings (`{ name: "Bob" }` → `%{"name" => "Bob"}`), strings stay binaries.
+Atoms are never garbage collected and a node has a limit on them, so
+turning outside data into atoms can bring the node down. When the Elixir
+side wants atom keys, say so:
+
+```ts
+new Map([[atom("name"), "Bob"]]); // %{name: "Bob"}
+```
 
 `toJS(term)` turns a decoded term into plain JS data: atoms become strings
 (`nil` becomes `null`), UTF-8 binaries become strings, tuples become arrays,
