@@ -5,6 +5,7 @@ import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
+import { erlangName } from "./names.ts";
 import { isDown, Process, SpawnError, TimeoutError } from "./process.ts";
 
 /**
@@ -388,7 +389,7 @@ export class ErlNode {
 
   /**
    * Calls `handler` for every broadcast on Phoenix.PubSub `topic` of `remote`:
-   * `node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => ...)`.
+   * `node.subscribe(APP, "MyApp.PubSub", "orders", (event) => ...)`.
    * When the subscription or the connection is lost, it subscribes again
    * after `retry` ms (1000 by default). Errors thrown by `handler` are logged
    * and do not end the subscription. Returns a function that unsubscribes.
@@ -458,6 +459,7 @@ export class ErlNode {
   /** Registers `p` under `name`, so remote processes can send to `{name, node}`. */
   register(name: string, p: Process) {
     if (!p.alive) throw new Error("process exited");
+    name = erlangName(name);
     const owner = this.names.get(name);
     if (owner && owner !== p) throw new Error(`name ${name} is already registered`);
     this.names.set(name, p);
@@ -465,12 +467,12 @@ export class ErlNode {
 
   /** The live process on this node with this pid or registered name. */
   lookup(target: Pid | string): Process | undefined {
-    return typeof target === "string" ? this.names.get(target) : this.local(target);
+    return typeof target === "string" ? this.names.get(erlangName(target)) : this.local(target);
   }
 
   /** The pid registered under `name`, like `Process.whereis/1`. */
   whereis(name: string): Pid | undefined {
-    return this.names.get(name)?.pid;
+    return this.names.get(erlangName(name))?.pid;
   }
 
   /**
@@ -490,7 +492,7 @@ export class ErlNode {
    */
   async send(to: Dest, msg: Term, from: Pid = this.pid): Promise<void> {
     if (typeof to === "string") {
-      const mb = this.names.get(to);
+      const mb = this.names.get(erlangName(to));
       if (!mb) throw new Error(`no process registered as ${to}`);
       return mb.deliver(msg);
     }
@@ -501,7 +503,7 @@ export class ErlNode {
       else conn.send(tuple(OP.SEND, atom(""), to), msg);
       return;
     }
-    const [name, node] = to;
+    const [name, node] = [erlangName(to[0]), to[1]];
     if (node === this.name.name) return this.names.get(name)?.deliver(msg);
     const conn = await this.dial(node);
     conn.send(tuple(OP.REG_SEND, from, atom(""), atom(name)), msg);
@@ -509,7 +511,7 @@ export class ErlNode {
 
   /**
    * `GenServer.call(to, request, timeout)`. `to` is a pid or `[name, node]`
-   * (Elixir modules need the `Elixir.` prefix: `["Elixir.Counter", node]`).
+   * (`["Counter", node]` is the Elixir `Counter`, see `erlangName`).
    * Fails with `CallError` if the process does not exist, exits before
    * replying or its node disconnects, and with `TimeoutError` on timeout.
    */
@@ -538,7 +540,7 @@ export class ErlNode {
    */
   rpc(node: string, m: string, f: string, args: Term[] = [], timeout = 5000): Promise<Term> {
     const gl = this.groupLeaderPid();
-    return this.call(["rex", node], tuple(atom("call"), atom(m), atom(f), args, gl), timeout);
+    return this.call(["rex", node], tuple(atom("call"), atom(erlangName(m)), atom(f), args, gl), timeout);
   }
 
   /**
@@ -580,7 +582,7 @@ export class ErlNode {
       const res = this.makeRef();
       const deadline = Date.now() + timeout;
       const spawned = await withTimeout(
-        mb.spawnOn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true }),
+        mb.spawnOn(node, "erpc", "execute_call", [res, atom(erlangName(m)), atom(f), args], { monitor: true }),
         timeout,
       ).catch((err) => {
         throw err instanceof SpawnError ? new ErpcError("error", tuple(atom("erpc"), err.reason)) : err;
@@ -605,13 +607,13 @@ export class ErlNode {
    * The functions of module `mod` on `remote` as JS functions, each one an
    * `erpc` call:
    *
-   *     const users = node.module(APP, "Elixir.MyApp.Users");
+   *     const users = node.module(APP, "MyApp.Users");
    *     await users.get(1); // :erpc.call(APP, MyApp.Users, :get, [1])
    *
    * Names with `?` or `!` need brackets: `users["valid?"](x)`. Nothing is
    * checked up front: a missing function fails when called, with `ErpcError`.
    * List the function names to have them typed as always present:
-   * `node.module<"get" | "list">(APP, "Elixir.MyApp.Users")`.
+   * `node.module<"get" | "list">(APP, "MyApp.Users")`.
    */
   module<Fn extends string = string>(
     remote: string,

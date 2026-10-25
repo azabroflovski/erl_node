@@ -2,6 +2,7 @@ import { OP } from "./connection.ts";
 import { DFLAG } from "./handshake.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import type { Connection } from "./connection.ts";
+import { erlangName } from "./names.ts";
 import type { Dest, ErlNode } from "./node.ts";
 
 export class TimeoutError extends Error {}
@@ -175,7 +176,7 @@ export class Process {
   async monitor(target: Pid | [name: string, node: string]): Promise<Ref> {
     if (!this.alive) throw new Error("process exited");
     const ref = this.node.makeRef();
-    const proc = target instanceof Pid ? target : atom(target[0]);
+    const proc = target instanceof Pid ? target : atom(erlangName(target[0]));
     const nodeName = target instanceof Pid ? target.node.name : target[1];
     if (nodeName === this.node.name.name) {
       const other = this.node.lookup(target instanceof Pid ? target : target[0]);
@@ -218,7 +219,7 @@ export class Process {
     const options: Term[] = [];
     if (opts.link) options.push(atom("link"));
     if (opts.monitor) options.push(atom("monitor"));
-    const mfa = tuple(atom(m), atom(f), args.length);
+    const mfa = tuple(atom(erlangName(m)), atom(f), args.length);
     return new Promise((resolve, reject) => {
       this.spawns.set(reqId.key, { node, resolve, reject });
       conn.trySend(tuple(OP.SPAWN_REQUEST, reqId, this.pid, this.node.groupLeaderPid(), mfa, options), args);
@@ -251,7 +252,7 @@ export class Process {
       tuple(atom("A"), args),
       tuple(atom("F"), atom(f)),
       tuple(atom("Js"), this.pid),
-      tuple(atom("M"), atom(m)),
+      tuple(atom("M"), atom(erlangName(m))),
       tuple(atom("Ref"), ref),
     ];
     const exprs = await relayExprs(this.node, node);
@@ -275,11 +276,11 @@ export class Process {
 
   /**
    * Subscribes this process to a Phoenix.PubSub topic on `node`:
-   * `self.subscribe(node, "Elixir.MyApp.PubSub", "orders")`. Broadcasts to the
+   * `self.subscribe(node, "MyApp.PubSub", "orders")`. Broadcasts to the
    * topic arrive in the mailbox as they are. A relay under the hood, see `relay`.
    */
   async subscribe(node: string, pubsub: string, topic: string): Promise<{ stop: () => Promise<void> }> {
-    const { stop } = await this.relay(node, "Elixir.Phoenix.PubSub", "subscribe", [atom(pubsub), topic]);
+    const { stop } = await this.relay(node, "Phoenix.PubSub", "subscribe", [atom(erlangName(pubsub)), topic]);
     return { stop };
   }
 

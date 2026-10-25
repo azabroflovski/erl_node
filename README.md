@@ -37,8 +37,9 @@ await node.connect(APP);
 await node.send(["echo", APP], ["hello", 42]);
 
 // GenServer.call({Counter, :"app@localhost"}, :inc).
-// Elixir module names need the "Elixir." prefix.
-await node.call(["Elixir.Counter", APP], atom("inc"));
+// Names are written as in Elixir: "Counter" is the module Counter
+// (:"Elixir.Counter"), lowercase names like "lists" are Erlang modules.
+await node.call(["Counter", APP], atom("inc"));
 
 // :rpc.call and :erpc.call
 await node.rpc(APP, "erlang", "node"); // atom("app@localhost")
@@ -79,6 +80,13 @@ The API follows Elixir:
 
 One node keeps any number of connections, outgoing and incoming.
 
+Module and process names follow Elixir: a name that starts with an
+uppercase letter is an Elixir alias, so `"MyApp.Users"` means
+`:"Elixir.MyApp.Users"`; lowercase names (`"lists"`, `"erlang"`) are Erlang
+modules. This applies wherever erlnode expects a module or a registered
+name. `atom("...")` is always taken literally, so atoms inside arguments
+need the full name: `atom("Elixir.MyApp.Registry")`.
+
 ## High-level API
 
 Shortcuts for common jobs, built on the API above. Each one is a process
@@ -87,7 +95,7 @@ with a loop you could write yourself; the sections below show how.
 ```ts
 // Listen to a Phoenix.PubSub topic. Subscribes again if the connection or
 // the subscription is lost; returns a function that unsubscribes.
-const off = node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => {
+const off = node.subscribe(APP, "MyApp.PubSub", "orders", (event) => {
   console.log(event);
 });
 
@@ -104,7 +112,7 @@ node.serve("prices", {
 
 // Call functions of a remote module through :erpc. Listing the names
 // is optional and only gives types.
-const users = node.module<"get" | "list">(APP, "Elixir.MyApp.Users");
+const users = node.module<"get" | "list">(APP, "MyApp.Users");
 await users.get(1);                   // :erpc.call(APP, MyApp.Users, :get, [1])
 
 // Start a process again after a crash, like a :transient supervisor child.
@@ -161,7 +169,7 @@ import { toJS } from "erlnode";
 
 type User = { name: string; roles: string[]; manager: string | null };
 
-const user = toJS<User>(await node.rpc(APP, "Elixir.MyApp.Users", "get", [1]));
+const user = toJS<User>(await node.rpc(APP, "MyApp.Users", "get", [1]));
 // %{name: "Bob", roles: [:admin], manager: nil}
 // → { name: "Bob", roles: ["admin"], manager: null }
 // The type parameter only saves a cast; nothing checks the data against it.
@@ -236,7 +244,7 @@ the connection drops.
 
 ```ts
 node.spawn(async (self) => {
-  await self.send(["Elixir.Prices", "app@localhost"], tuple(atom("subscribe"), self.pid));
+  await self.send(["Prices", "app@localhost"], tuple(atom("subscribe"), self.pid));
   for await (const msg of self) console.log(msg);
 });
 ```
@@ -252,7 +260,7 @@ with no code added to the app:
 
 ```ts
 node.spawn(async (self) => {
-  await self.subscribe("app@localhost", "Elixir.MyApp.PubSub", "orders");
+  await self.subscribe("app@localhost", "MyApp.PubSub", "orders");
   for await (const event of self) {
     console.log(event); // Phoenix.PubSub.broadcast(MyApp.PubSub, "orders", event)
   }
@@ -266,7 +274,8 @@ process. The atom `$self` in `args` stands for the relay's pid:
 
 ```ts
 // Registry.register(MyApp.Registry, "key", nil)
-await self.relay(APP, "Elixir.Registry", "register", [atom("Elixir.MyApp.Registry"), "key", atom("nil")]);
+// (inside arguments, atom() needs the full Elixir name)
+await self.relay(APP, "Registry", "register", [atom("Elixir.MyApp.Registry"), "key", atom("nil")]);
 
 // :pg.join(:my_scope, "workers", relay_pid)
 await self.relay(APP, "pg", "join", [atom("my_scope"), "workers", atom("$self")]);
@@ -287,7 +296,7 @@ node.spawn(async (self) => {
   self.trapExit = true;
   for (;;) {
     try {
-      await self.subscribe(APP, "Elixir.MyApp.PubSub", "orders");
+      await self.subscribe(APP, "MyApp.PubSub", "orders");
       for await (const msg of self) {
         if (msg instanceof Tuple && msg.at(0) === atom("EXIT")) break; // subscription lost
         console.log(msg);
