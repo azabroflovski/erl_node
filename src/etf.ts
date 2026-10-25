@@ -177,9 +177,11 @@ export const float = (value: number): Float => new Float(value);
  *
  * Encoding: safe integers become integers, other numbers become floats
  * (use `float()` to send `1.0`, `bigint` for exact large integers).
- * Strings go out as UTF-8 binaries, plain objects as maps with atom keys.
+ * Strings go out as UTF-8 binaries, plain objects as maps with atom keys,
+ * `null` as the atom `nil`.
  */
 export type Term =
+  | null
   | number
   | bigint
   | boolean
@@ -282,6 +284,8 @@ function write(w: Writer, t: Term): void {
     else writeFloat(w, t);
   } else if (typeof t === "bigint") {
     writeInteger(w, t);
+  } else if (t === null) {
+    writeAtom(w, "nil");
   } else if (typeof t === "boolean") {
     writeAtom(w, t ? "true" : "false");
   } else if (typeof t === "string") {
@@ -635,6 +639,7 @@ const isByte = (t: Term): boolean => typeof t === "number" && Number.isInteger(t
 
 /** Renders a term roughly the way Erlang prints it, for messages and debugging. */
 export function format(t: Term): string {
+  if (t === null) return "nil";
   if (typeof t === "string") return JSON.stringify(t);
   if (typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return String(t);
   if (t instanceof Atom) return /^[a-z][a-zA-Z0-9_@]*$/.test(t.name) ? t.name : `'${t.name.replace(/'/g, "\\'")}'`;
@@ -649,4 +654,54 @@ export function format(t: Term): string {
   if (t instanceof Fun) return `#Fun<${t.module.name}.${t.index}>`;
   if (t instanceof BitBinary) return `<<${t.bytes.join(",")}:${t.bits}>>`;
   return `#{${Object.entries(t).map(([k, v]) => `${k} => ${format(v)}`).join(",")}}`;
+}
+
+/**
+ * Turns a decoded term into plain JS data, for JSON or code that does not
+ * want Erlang types. It loses information, so it is never applied
+ * implicitly:
+ *
+ * - atoms become strings, `nil` becomes `null`;
+ * - binaries become strings when they are valid UTF-8;
+ * - tuples become arrays;
+ * - maps become objects when every key is an atom, a string or a number,
+ *   and stay `Map`s otherwise (with converted keys and values);
+ * - pids, references, ports, funs and bitstrings are kept as they are.
+ *
+ * `encode(toJS(term))` gives back an equal term except that tuples come
+ * back as lists, atoms as binaries and object keys as atoms.
+ */
+export function toJS(t: Term): unknown {
+  if (t === null || typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return t;
+  if (typeof t === "string") return t;
+  if (t instanceof Atom) return t.name === "nil" ? null : t.name;
+  if (t instanceof Float) return t.value;
+  if (t instanceof Uint8Array) {
+    try {
+      return utf8Decoder.decode(t);
+    } catch {
+      return t;
+    }
+  }
+  if (t instanceof Tuple) return t.elements.map(toJS);
+  if (Array.isArray(t)) return t.map(toJS);
+  if (t instanceof Map) {
+    const entries = [...t].map(([k, v]) => [toJS(k), toJS(v)] as const);
+    if (entries.every(([k]) => typeof k === "string" || typeof k === "number")) {
+      return Object.fromEntries(entries);
+    }
+    return new Map(entries);
+  }
+  if (
+    t instanceof Pid ||
+    t instanceof Ref ||
+    t instanceof Port ||
+    t instanceof Fun ||
+    t instanceof Export ||
+    t instanceof ImproperList ||
+    t instanceof BitBinary
+  ) {
+    return t;
+  }
+  return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, toJS(v)]));
 }

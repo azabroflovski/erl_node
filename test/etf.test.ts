@@ -12,6 +12,7 @@ import {
   Pid,
   Port,
   Ref,
+  toJS,
   Tuple,
   tuple,
 } from "../src/etf.ts";
@@ -161,8 +162,52 @@ describe("encode matches Elixir", () => {
     expect(out.trim()).toBe(`{:ok, "héllo", [1, 2, 3], ${2n ** 100n}}`);
   });
 
+  test("null is nil", async () => {
+    expect(encode(null)).toEqual(encode(atom("nil")));
+    const out = await runElixir(`IO.inspect(:erlang.binary_to_term(Base.decode16!("${hex(encode({ a: null }))}", case: :lower)))`);
+    expect(out.trim()).toBe("%{a: nil}");
+  });
+
   test("rejects what it cannot encode", () => {
-    expect(() => encode(null as never)).toThrow("cannot encode");
     expect(() => encode(undefined as never)).toThrow("cannot encode");
+  });
+});
+
+describe("toJS", () => {
+  test("turns an Elixir term into plain JS data", async () => {
+    const src = `%{
+      name: "Bob",
+      age: 30,
+      score: 1.5,
+      admin: false,
+      manager: nil,
+      tags: [:a, "b"],
+      point: {1, 2},
+      raw: <<255, 0>>,
+      nested: %{"key" => %{1 => :one}},
+      owner: self()
+    }`;
+    const out = await runElixir(`IO.puts(Base.encode16(:erlang.term_to_binary(${src}), case: :lower))`);
+    const js = toJS(decode(Buffer.from(out.trim(), "hex"))) as Record<string, unknown>;
+    const { owner, ...rest } = js;
+    expect(rest).toEqual({
+      name: "Bob",
+      age: 30,
+      score: 1.5,
+      admin: false,
+      manager: null,
+      tags: ["a", "b"],
+      point: [1, 2],
+      raw: new Uint8Array([255, 0]),
+      nested: { key: { 1: "one" } },
+    });
+    expect(owner).toBeInstanceOf(Pid);
+    expect(JSON.parse(JSON.stringify(rest.nested))).toEqual({ key: { "1": "one" } });
+  });
+
+  test("maps with keys that are not strings stay Maps", () => {
+    const m = toJS(new Map([[tuple(1, 2), atom("x")]])) as Map<unknown, unknown>;
+    expect(m).toBeInstanceOf(Map);
+    expect([...m]).toEqual([[[1, 2], "x"]]);
   });
 });

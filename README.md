@@ -98,6 +98,20 @@ One node keeps any number of connections, outgoing and incoming.
 | pid, reference, port | `Pid`, `Ref`, `Port` | `Pid`, `Ref`, `Port` |
 
 Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
+`null` is encoded as `nil`.
+
+`toJS(term)` turns a decoded term into plain JS data: atoms become strings
+(`nil` becomes `null`), UTF-8 binaries become strings, tuples become arrays,
+maps become objects. It loses information, so it is only applied when you
+call it:
+
+```ts
+import { toJS } from "erlnode";
+
+const user = toJS(await node.rpc(APP, "Elixir.MyApp.Users", "get", [1]));
+// %{name: "Bob", roles: [:admin], manager: nil}
+// → { name: "Bob", roles: ["admin"], manager: null }
+```
 
 ## What works
 

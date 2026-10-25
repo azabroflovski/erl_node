@@ -15,6 +15,7 @@ export {
   Port,
   Ref,
   type Term,
+  toJS,
   Tuple,
   tuple,
 } from "./etf.ts";
