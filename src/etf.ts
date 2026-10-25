@@ -649,7 +649,14 @@ export function format(t: Term): string {
   if (typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return String(t);
   if (t instanceof Atom) return /^[a-z][a-zA-Z0-9_@]*$/.test(t.name) ? t.name : `'${t.name.replace(/'/g, "\\'")}'`;
   if (t instanceof Float) return String(t.value);
-  if (t instanceof Uint8Array) return `<<${t.join(",")}>>`;
+  if (t instanceof Uint8Array) {
+    // Printable UTF-8 text is shown the way Erlang shows it: <<"Bob">>.
+    try {
+      const text = utf8Decoder.decode(t);
+      if (text && !/[\x00-\x1f\x7f]/.test(text)) return `<<${JSON.stringify(text)}>>`;
+    } catch {}
+    return `<<${t.join(",")}>>`;
+  }
   if (t instanceof Tuple) return `{${t.elements.map(format).join(",")}}`;
   if (Array.isArray(t)) return `[${t.map(format).join(",")}]`;
   if (t instanceof ImproperList) return `[${t.items.map(format).join(",")}|${format(t.tail)}]`;

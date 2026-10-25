@@ -41,9 +41,11 @@ await node.send(["echo", APP], ["hello", 42]);
 // (:"Elixir.Counter"), lowercase names like "lists" are Erlang modules.
 await node.call(["Counter", APP], atom("inc"));
 
-// :rpc.call and :erpc.call
-await node.rpc(APP, "erlang", "node"); // atom("app@localhost")
-await node.erpc(APP, "erlang", "node"); // same, in a new remote process
+// :erpc.call: errors in the remote function throw ErpcError.
+await node.erpc(APP, "erlang", "node"); // atom("app@localhost")
+
+// :rpc.call: like in Erlang, errors come back as a {:badrpc, reason} value.
+await node.rpc(APP, "erlang", "node");
 
 // A process: a pid, a mailbox and a body. It exits when the body returns.
 node.spawn(async (self) => {
@@ -169,7 +171,7 @@ import { toJS } from "erlnode";
 
 type User = { name: string; roles: string[]; manager: string | null };
 
-const user = toJS<User>(await node.rpc(APP, "MyApp.Users", "get", [1]));
+const user = toJS<User>(await node.erpc(APP, "MyApp.Users", "get", [1]));
 // %{name: "Bob", roles: [:admin], manager: nil}
 // → { name: "Bob", roles: ["admin"], manager: null }
 // The type parameter only saves a cast; nothing checks the data against it.
@@ -187,6 +189,8 @@ const user = toJS<User>(await node.rpc(APP, "MyApp.Users", "get", [1]));
   target, so a missing or crashed process fails the call with `CallError`.
 - `erpc` (`:erpc.call`): runs the function in a new process on the remote
   node; exceptions come back as `ErpcError` with the Erlang class and reason.
+  Prefer it (or `node.module`) to `rpc`: a failed `rpc` does not throw, it
+  returns `{:badrpc, reason}`, which is easy to miss.
 - `self.subscribe(node, pubsub, topic)` subscribes to Phoenix.PubSub;
   `self.relay(node, m, f, args)` does the same for `Registry`, `:pg` or
   anything else that registers the caller. Nothing is deployed on the
@@ -337,6 +341,26 @@ node.spawn(async (self) => {
   }
 });
 ```
+
+## Debugging
+
+Set `ERLNODE_DEBUG=1` to log connections and every control message to
+stderr, in Erlang notation:
+
+```
+erlnode: connected to app@localhost
+erlnode: → app@localhost MONITOR_P {19,#PID<js@localhost.2.0>,'Elixir.Counter',#Reference<js@localhost.1.2665438959.0>}
+erlnode: → app@localhost REG_SEND {6,#PID<js@localhost.2.0>,'','Elixir.Counter'} {'$gen_call',{#PID<js@localhost.2.0>,#Reference<js@localhost.1.2665438959.0>},inc}
+erlnode: app@localhost → SEND_SENDER {22,#PID<app@localhost.118.0>,#PID<js@localhost.2.0>} {#Reference<js@localhost.1.2665438959.0>,1}
+erlnode: → app@localhost DEMONITOR_P {20,#PID<js@localhost.2.0>,'Elixir.Counter',#Reference<js@localhost.1.2665438959.0>}
+erlnode: connection to app@localhost closed: connection closed by us
+```
+
+That is `node.call(["Counter", "app@localhost"], atom("inc"))`: a monitor on
+the target, the `$gen_call` message, the reply `{ref, 1}`, the demonitor.
+Payloads longer than 500 characters are cut. Without the variable nothing is
+logged. The log shows message contents (never the cookie), so keep it off
+where messages carry private data.
 
 ## Compatibility
 

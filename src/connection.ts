@@ -1,6 +1,7 @@
 import type { Socket } from "node:net";
 import { type Atom, decodeFrom, decodeRaw, encode, encodeRaw, type Pid, Reader, type Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { frame, type FrameReader } from "./framing.ts";
+import { brief, debug, debugEnabled } from "./debug.ts";
 import { DFLAG } from "./handshake.ts";
 
 // Control message operations, see erl_dist_protocol.
@@ -22,6 +23,14 @@ export const OP = {
   UNLINK_ID: 35,
   UNLINK_ID_ACK: 36,
 } as const;
+
+const OP_NAMES = new Map<unknown, string>(Object.entries(OP).map(([name, code]) => [code, name]));
+
+// `{2, ...} + msg` as `SEND {2, ...} msg`, for the debug log.
+function describe(control: Tuple, payload: Term | undefined): string {
+  const name = OP_NAMES.get(control.at(0)) ?? "op";
+  return `${name} ${brief(control)}${payload === undefined ? "" : ` ${brief(payload)}`}`;
+}
 
 const PASS_THROUGH = 112;
 const VERSION = 131;
@@ -52,6 +61,7 @@ export class Connection {
   private fragments = new Map<bigint, { next: bigint; parts: Buffer[] }>();
   /** The peer negotiated DFLAG_FRAGMENTS, so messages use distribution headers. */
   readonly fragmented: boolean;
+  private debug = debugEnabled();
   closed = false;
   /** Resolves with the reason once the connection is gone. */
   readonly done: Promise<Error>;
@@ -65,6 +75,7 @@ export class Connection {
     private reader: FrameReader,
   ) {
     this.fragmented = (peerFlags & DFLAG.FRAGMENTS) !== 0n;
+    if (this.debug) debug(`connected to ${peerName}`);
     this.done = new Promise((resolve) => (this.resolveDone = resolve));
     this.ticker = setInterval(() => {
       if (!this.wrote) this.socket.write(TICK);
@@ -137,12 +148,14 @@ export class Connection {
 
   private deliver(control: Term, payload: Term | undefined) {
     if (!(control instanceof Tuple)) throw new Error("control message is not a tuple");
+    if (this.debug) debug(`${this.peerName} → ${describe(control, payload)}`);
     this.onMessage(control, payload);
   }
 
   /** Sends a control message and an optional payload. */
   send(control: Tuple, payload?: Term) {
     if (this.closed) throw new Error(`connection to ${this.peerName} is closed`);
+    if (this.debug) debug(`→ ${this.peerName} ${describe(control, payload)}`);
     this.wrote = true;
     if (!this.fragmented) {
       const parts = [Uint8Array.of(PASS_THROUGH), encode(control)];
@@ -180,6 +193,7 @@ export class Connection {
   private shutdown(err: Error) {
     if (this.closed) return;
     this.closed = true;
+    if (this.debug) debug(`connection to ${this.peerName} closed: ${err.message}`);
     clearInterval(this.ticker);
     this.socket.destroy();
     this.resolveDone(err);

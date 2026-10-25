@@ -5,6 +5,7 @@ import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
+import { debug, debugEnabled } from "./debug.ts";
 import { erlangName } from "./names.ts";
 import { isDown, Process, SpawnError, TimeoutError } from "./process.ts";
 
@@ -104,7 +105,10 @@ export class ErlNode {
     if (!conn) {
       conn = this.openConnection(remote);
       this.connections.set(remote, conn);
-      conn.catch(() => this.connections.delete(remote));
+      conn.catch((err: Error) => {
+        this.connections.delete(remote);
+        if (debugEnabled()) debug(`connecting to ${remote} failed: ${err.message}`);
+      });
     }
     return conn;
   }
@@ -215,7 +219,8 @@ export class ErlNode {
       const conn = new Connection(hs.peerName, hs.peerFlags, socket, reader);
       if (!this.connections.has(hs.peerName)) this.connections.set(hs.peerName, Promise.resolve(conn));
       this.adopt(hs.peerName, conn);
-    } catch {
+    } catch (err) {
+      if (debugEnabled()) debug(`incoming connection refused: ${(err as Error).message}`);
       socket.destroy();
     }
   }
