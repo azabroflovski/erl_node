@@ -1,4 +1,5 @@
 import type { Subprocess } from "bun";
+import type { ErlNode, Process } from "../../src/index.ts";
 
 export const COOKIE = "secret";
 
@@ -138,4 +139,17 @@ export async function runElixir(code: string, args: string[] = []): Promise<stri
   ]);
   if (status !== 0) throw new Error(`elixir exited with ${status}:\n${err}`);
   return out;
+}
+
+/**
+ * Spawns a process whose body just waits, and returns it, so a test can
+ * drive its mailbox directly. It lives until `exit` or an exit signal.
+ */
+export function inbox(node: ErlNode): Process {
+  let self!: Process;
+  node.spawn((p) => {
+    self = p;
+    return new Promise(() => {});
+  });
+  return self;
 }

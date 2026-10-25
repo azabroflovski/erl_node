@@ -5,7 +5,7 @@ import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
-import { isDown, Mailbox, SpawnError } from "./mailbox.ts";
+import { isDown, Process, SpawnError } from "./process.ts";
 
 /**
  * Where a message goes, as in Elixir's `send/2`: a pid, a name registered on
@@ -43,8 +43,6 @@ export class CallError extends Error {
   }
 }
 
-const EXIT = atom("EXIT");
-
 /**
  * A hidden Erlang node implemented in JS. It connects to other nodes on
  * demand and, after `listen()`, accepts connections from them.
@@ -52,18 +50,18 @@ const EXIT = atom("EXIT");
 export class ErlNode {
   readonly name: Atom;
   readonly creation = randomInt(4, 2 ** 32);
-  /** Sender pid for messages sent without an explicit mailbox. */
+  /** Sender pid for messages sent from outside a process. */
   readonly pid: Pid;
 
   private cookie: string;
   private connections = new Map<string, Promise<Connection>>();
   private established = new Map<string, Connection>();
-  private mailboxes = new Map<number, Mailbox>();
-  private names = new Map<string, Mailbox>();
+  private processes = new Map<number, Process>();
+  private names = new Map<string, Process>();
   private arrivals = new Map<string, Array<(conn: Connection) => void>>();
   private nextPidId = 1;
   private nextRefId = 1;
-  private groupLeader?: Mailbox;
+  private groupLeader?: Process;
   private server?: Server;
   private registration?: Registration;
 
@@ -163,7 +161,7 @@ export class ErlNode {
         this.established.delete(remote);
         this.connections.delete(remote);
       }
-      for (const mb of [...this.mailboxes.values()]) mb.connectionLost(remote);
+      for (const p of [...this.processes.values()]) p.connectionLost(remote);
     });
     for (const f of this.arrivals.get(remote) ?? []) f(conn);
     this.arrivals.delete(remote);
@@ -219,12 +217,12 @@ export class ErlNode {
     }
   }
 
-  private local(pid: Term | undefined): Mailbox | undefined {
+  private local(pid: Term | undefined): Process | undefined {
     if (!(pid instanceof Pid) || pid.node !== this.name || pid.creation !== this.creation) return undefined;
-    return this.mailboxes.get(pid.id);
+    return this.processes.get(pid.id);
   }
 
-  private localOrNamed(proc: Term | undefined): Mailbox | undefined {
+  private localOrNamed(proc: Term | undefined): Process | undefined {
     return proc instanceof Atom ? this.names.get(proc.name) : this.local(proc);
   }
 
@@ -251,7 +249,7 @@ export class ErlNode {
         return;
       case OP.EXIT2:
       case OP.PAYLOAD_EXIT2:
-        if (a instanceof Pid) this.local(b)?.deliver(tuple(EXIT, a, op === OP.EXIT2 ? d! : payload!));
+        if (a instanceof Pid) this.local(b)?.exitSignal(a, op === OP.EXIT2 ? d! : payload!, true);
         return;
       case OP.MONITOR_P: {
         if (!(a instanceof Pid) || !(d instanceof Ref)) return;
@@ -308,29 +306,63 @@ export class ErlNode {
     return new Ref(this.name, this.creation, [n & 0x3ffff, randomInt(0, 2 ** 32), Math.floor(n / 0x40000)]);
   }
 
-  spawnMailbox(): Mailbox {
-    const mb = new Mailbox(this.makePid(), this);
-    this.mailboxes.set(mb.pid.id, mb);
-    return mb;
+  /**
+   * Starts a process running `fn`, like `spawn/1`, and returns its pid.
+   * The process exits with `:normal` when `fn` returns, and with
+   * `{:js_error, message}` when it throws; the error is also logged, as
+   * Erlang logs crashed processes.
+   */
+  spawn(fn: (self: Process) => unknown): Pid {
+    const p = this.process();
+    void (async () => {
+      try {
+        await fn(p);
+        p.exit();
+      } catch (err) {
+        // A process killed by a signal sees its pending receive fail; that is not a crash.
+        if (!p.alive) return;
+        console.error(`erlnode: process ${p.pid} crashed:`, err);
+        p.exit(tuple(atom("js_error"), err instanceof Error ? err.message : String(err)));
+      }
+    })();
+    return p.pid;
   }
 
-  /** Forgets a closed mailbox and its names. Called by `Mailbox.close`. */
-  drop(mb: Mailbox) {
-    this.mailboxes.delete(mb.pid.id);
-    for (const [name, owner] of this.names) if (owner === mb) this.names.delete(name);
+  /**
+   * Sends an exit signal to `pid`, like `Process.exit/2`. `:kill` ends the
+   * process unconditionally; other reasons follow the target's `trapExit`.
+   */
+  async exit(pid: Pid, reason: Term): Promise<void> {
+    if (pid.node === this.name) return this.local(pid)?.exitSignal(this.pid, reason, true);
+    const conn = await this.dial(pid.node.name);
+    if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) conn.send(tuple(OP.PAYLOAD_EXIT2, this.pid, pid), reason);
+    else conn.send(tuple(OP.EXIT2, this.pid, pid, reason));
   }
 
-  /** Registers `mb` under `name`, so remote processes can send to `{name, node}`. */
-  register(name: string, mb: Mailbox) {
-    if (mb.closed) throw new Error("mailbox closed");
+  // A process without a body, for request/reply helpers like `call`.
+  private process(): Process {
+    const p = new Process(this.makePid(), this);
+    this.processes.set(p.pid.id, p);
+    return p;
+  }
+
+  /** Forgets an exited process and its names. Called by `Process.exit`. */
+  drop(p: Process) {
+    this.processes.delete(p.pid.id);
+    for (const [name, owner] of this.names) if (owner === p) this.names.delete(name);
+  }
+
+  /** Registers `p` under `name`, so remote processes can send to `{name, node}`. */
+  register(name: string, p: Process) {
+    if (!p.alive) throw new Error("process exited");
     const owner = this.names.get(name);
-    if (owner && owner !== mb) throw new Error(`name ${name} is already registered`);
-    this.names.set(name, mb);
+    if (owner && owner !== p) throw new Error(`name ${name} is already registered`);
+    this.names.set(name, p);
   }
 
-  /** The mailbox registered under `name`. */
-  whereis(name: string): Mailbox | undefined {
-    return this.names.get(name);
+  /** The pid registered under `name`, like `Process.whereis/1`. */
+  whereis(name: string): Pid | undefined {
+    return this.names.get(name)?.pid;
   }
 
   /**
@@ -374,7 +406,7 @@ export class ErlNode {
    * replying or its node disconnects, and with `TimeoutError` on timeout.
    */
   async call(to: Pid | [name: string, node: string], request: Term, timeout = 5000): Promise<Term> {
-    const mb = this.spawnMailbox();
+    const mb = this.process();
     try {
       // Like gen:call, the monitor reference doubles as the reply tag.
       const ref = await mb.monitor(to);
@@ -388,7 +420,7 @@ export class ErlNode {
       const target = to instanceof Pid ? String(to) : `${to[0]} on ${to[1]}`;
       throw new CallError(`call to ${target} failed: ${format(reason)}`, reason);
     } finally {
-      mb.close();
+      mb.exit();
     }
   }
 
@@ -408,7 +440,7 @@ export class ErlNode {
    */
   groupLeaderPid(): Pid {
     if (this.groupLeader) return this.groupLeader.pid;
-    const gl = this.spawnMailbox();
+    const gl = this.process();
     this.groupLeader = gl;
     const loop = async () => {
       for (;;) {
@@ -435,11 +467,11 @@ export class ErlNode {
    * reason. On timeout the remote process keeps running, as with `:erpc`.
    */
   async erpc(node: string, m: string, f: string, args: Term[] = [], timeout = 5000): Promise<Term> {
-    const mb = this.spawnMailbox();
+    const mb = this.process();
     try {
       const res = this.makeRef();
       const spawned = await mb
-        .spawn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true })
+        .spawnOn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true })
         .catch((err) => {
           throw err instanceof SpawnError ? new ErpcError("error", tuple(atom("erpc"), err.reason)) : err;
         });
@@ -454,13 +486,13 @@ export class ErlNode {
       if (reason === atom("noconnection")) throw new ErpcError("error", tuple(atom("erpc"), reason));
       throw new ErpcError("exit", tuple(atom("signal"), reason));
     } finally {
-      mb.close();
+      mb.exit();
     }
   }
 
-  /** Stops listening, unregisters from EPMD and closes all connections. */
+  /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
   async close() {
-    this.groupLeader?.close();
+    for (const p of [...this.processes.values()]) p.exit(atom("shutdown"));
     this.groupLeader = undefined;
     this.registration?.close();
     this.registration = undefined;

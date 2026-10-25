@@ -38,23 +38,27 @@ type Waiter = {
 let nextUnlinkId = 1;
 
 /**
- * A process-like mailbox owned by the JS node, addressable by its pid.
+ * A process on the JS node: a pid with a mailbox, started by `node.spawn`.
+ * It lives while its function runs, and exits like an Erlang process:
+ * linked processes get exit signals, monitors fire with `:DOWN`.
  *
- * It behaves like a process that traps exits: exit signals from linked
- * processes and from `exit/2` arrive as `{:EXIT, from, reason}` messages,
- * monitors deliver `{:DOWN, ref, :process, object, reason}`.
+ * Exit signals follow Erlang: without `trapExit` a non-normal exit signal
+ * kills the process; with it, signals arrive as `{:EXIT, from, reason}`
+ * messages. `exit(pid, :kill)` cannot be trapped.
  */
-export class Mailbox {
+export class Process {
   private queue: Term[] = [];
   private waiters: Waiter[] = [];
-  closed = false;
+  alive = true;
+  /** `Process.flag(:trap_exit, true)`: turn exit signals into messages. */
+  trapExit = false;
 
   // The fields below are kept up to date by ErlNode as signals arrive.
   /** Linked pids by key; `unlinking` holds the id of a pending UNLINK_ID. */
   readonly links = new Map<string, { pid: Pid; unlinking?: number }>();
-  /** Monitors this mailbox owns, by ref key. */
+  /** Monitors this process owns, by ref key. */
   readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string }>();
-  /** Remote processes monitoring this mailbox, by ref key. */
+  /** Remote processes monitoring this process, by ref key. */
   readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
   /** Spawn requests waiting for SPAWN_REPLY, by request id key. */
   readonly spawns = new Map<string, PendingSpawn>();
@@ -66,7 +70,7 @@ export class Mailbox {
 
   /** Puts a message into the mailbox. */
   deliver(msg: Term) {
-    if (this.closed) return;
+    if (!this.alive) return;
     const i = this.waiters.findIndex((w) => w.match(msg));
     if (i === -1) {
       this.queue.push(msg);
@@ -79,7 +83,7 @@ export class Mailbox {
 
   /** Takes the first message that satisfies `match`, waiting up to `timeout` ms for one. */
   receive(match: (msg: Term) => boolean = () => true, timeout = Infinity): Promise<Term> {
-    if (this.closed) return Promise.reject(new Error("mailbox closed"));
+    if (!this.alive) return Promise.reject(new Error("process exited"));
     const i = this.queue.findIndex(match);
     if (i !== -1) return Promise.resolve(this.queue.splice(i, 1)[0]!);
     return new Promise((resolve, reject) => {
@@ -94,19 +98,19 @@ export class Mailbox {
     });
   }
 
-  /** Registers this mailbox under `name` on its node. */
+  /** Registers this process under `name` on its node, like `Process.register/2`. */
   register(name: string) {
     this.node.register(name, this);
   }
 
-  /** Sends `msg` with this mailbox's pid as the sender. */
+  /** Sends `msg` with this process as the sender. */
   send(to: Dest, msg: Term): Promise<void> {
     return this.node.send(to, msg, this.pid);
   }
 
   /** Links to `pid`. If its node cannot be reached, `{:EXIT, pid, :noconnection}` arrives. */
   async link(pid: Pid): Promise<void> {
-    if (this.closed) throw new Error("mailbox closed");
+    if (!this.alive) throw new Error("process exited");
     const existing = this.links.get(pid.key);
     if (existing && existing.unlinking === undefined) return;
     this.links.set(pid.key, { pid });
@@ -137,7 +141,7 @@ export class Mailbox {
    * the monitor reference.
    */
   async monitor(target: Pid | [name: string, node: string]): Promise<Ref> {
-    if (this.closed) throw new Error("mailbox closed");
+    if (!this.alive) throw new Error("process exited");
     const ref = this.node.makeRef();
     const proc = target instanceof Pid ? target : atom(target[0]);
     const nodeName = target instanceof Pid ? target.node.name : target[1];
@@ -152,19 +156,19 @@ export class Mailbox {
   }
 
   /**
-   * Starts `m.f(...args)` on `node` with this mailbox as the parent, like
-   * `spawn_opt/4` with `link` and `monitor`. Resolves once the remote node
-   * has started the process. The monitor reference is the request id, as in
-   * `erlang:spawn_request/5`.
+   * Starts `m.f(...args)` on `node` with this process as the parent, like
+   * `Node.spawn/4` with `link` and `monitor` options. Resolves once the
+   * remote node has started the process. The monitor reference is the
+   * request id, as in `erlang:spawn_request/5`.
    */
-  async spawn(
+  async spawnOn(
     node: string,
     m: string,
     f: string,
     args: Term[] = [],
     opts: { link?: boolean; monitor?: boolean } = {},
   ): Promise<Spawned> {
-    if (this.closed) throw new Error("mailbox closed");
+    if (!this.alive) throw new Error("process exited");
     const conn = await reach(this.node, node);
     if (!conn) throw new SpawnError(atom("noconnection"));
     if (!(conn.peerFlags & DFLAG.SPAWN)) throw new SpawnError(atom("notsup"));
@@ -200,12 +204,13 @@ export class Mailbox {
   }
 
   /**
-   * Closes the mailbox as if the process exited with `reason`: linked and
-   * monitoring processes get exit signals, own monitors are removed, pending
-   * `receive` calls are rejected.
+   * Ends the process with `reason`: linked and monitoring processes get exit
+   * signals, own monitors are removed, pending and later `receive` calls fail.
+   * The function passed to `spawn` should return after this.
    */
-  close(reason: Term = atom("normal")) {
-    if (this.closed) return;
+  exit(reason: Term = atom("normal")) {
+    if (!this.alive) return;
+    this.alive = false;
     for (const { ref } of [...this.monitors.values()]) this.demonitor(ref);
     for (const { pid, unlinking } of this.links.values()) {
       if (unlinking === undefined) this.node.connection(pid.node.name)?.exit(this.pid, pid, reason);
@@ -215,13 +220,12 @@ export class Mailbox {
     }
     this.links.clear();
     this.monitoredBy.clear();
-    for (const { reject } of this.spawns.values()) reject(new Error("mailbox closed"));
+    for (const { reject } of this.spawns.values()) reject(new Error("process exited"));
     this.spawns.clear();
-    this.closed = true;
     this.node.drop(this);
     for (const w of this.waiters.splice(0)) {
       clearTimeout(w.timer);
-      w.reject(new Error("mailbox closed"));
+      w.reject(new Error("process exited"));
     }
   }
 
@@ -230,7 +234,15 @@ export class Mailbox {
     const link = this.links.get(from.key);
     if (!link || link.unlinking !== undefined) return;
     this.links.delete(from.key);
-    this.deliver(tuple(EXIT, from, reason));
+    this.exitSignal(from, reason, false);
+  }
+
+  /** An exit signal from `from`; `direct` for `exit/2`, where `:kill` cannot be trapped. */
+  exitSignal(from: Pid, reason: Term, direct: boolean) {
+    if (!this.alive) return;
+    if (direct && reason === atom("kill")) return this.exit(atom("killed"));
+    if (this.trapExit) return this.deliver(tuple(EXIT, from, reason));
+    if (reason !== atom("normal")) this.exit(reason);
   }
 
   /** A monitored process went away. */
@@ -247,7 +259,7 @@ export class Mailbox {
     for (const [key, { pid, unlinking }] of this.links) {
       if (pid.node.name !== peer) continue;
       this.links.delete(key);
-      if (unlinking === undefined) this.deliver(tuple(EXIT, pid, noconnection));
+      if (unlinking === undefined) this.exitSignal(pid, noconnection, false);
     }
     for (const mon of [...this.monitors.values()]) {
       if (mon.node === peer) this.monitorDown(mon.ref, noconnection);

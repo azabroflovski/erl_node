@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { atom, binaryToString, CallError, type ErlNode, Fun, Pid, start, TimeoutError, Tuple, tuple } from "../src/index.ts";
-import { COOKIE, startNode, type TestNode } from "./support/node.ts";
+import { COOKIE, inbox, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
 let node: ErlNode;
@@ -17,34 +17,34 @@ afterAll(async () => {
 });
 
 test("send to a registered name, reply lands in the mailbox", async () => {
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   await node.send(["echo", remote.name], tuple(mb.pid, ["hello", 42]));
   const reply = (await mb.receive(undefined, 2000)) as Tuple;
   expect(reply.at(0)).toBe(atom("echo"));
   const [hello, n] = reply.at(1) as [Uint8Array, number];
   expect(binaryToString(hello)).toBe("hello");
   expect(n).toBe(42);
-  mb.close();
+  mb.exit();
 });
 
 test("send to a pid", async () => {
   const echo = await node.rpc(remote.name, "erlang", "whereis", [atom("echo")]);
   expect(echo).toBeInstanceOf(Pid);
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   await mb.send(echo as Pid, tuple(mb.pid, atom("ping")));
   expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("echo"), atom("ping")));
-  mb.close();
+  mb.exit();
 });
 
 test("receive with a pattern skips other messages", async () => {
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   await node.send(["echo", remote.name], tuple(mb.pid, 1));
   await node.send(["echo", remote.name], tuple(mb.pid, 2));
   const second = await mb.receive((m) => m instanceof Tuple && m.at(1) === 2, 2000);
   expect((second as Tuple).at(1)).toBe(2);
   expect(((await mb.receive(undefined, 2000)) as Tuple).at(1)).toBe(1);
   await expect(mb.receive(undefined, 100)).rejects.toBeInstanceOf(TimeoutError);
-  mb.close();
+  mb.exit();
 });
 
 test("GenServer.call", async () => {
@@ -108,12 +108,12 @@ test("list and disconnect", async () => {
 });
 
 test("local sends", async () => {
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   mb.register("local_inbox");
   await node.send("local_inbox", 1);
   await node.send(["local_inbox", node.name.name], 2);
   await node.send(mb.pid, 3);
   expect([await mb.receive(), await mb.receive(), await mb.receive()]).toEqual([1, 2, 3]);
-  mb.close();
+  mb.exit();
   await expect(node.send("local_inbox", 4)).rejects.toThrow("no process registered");
 });

@@ -10,7 +10,7 @@ import {
   TimeoutError,
   tuple,
 } from "../src/index.ts";
-import { COOKIE, startNode, type TestNode } from "./support/node.ts";
+import { COOKIE, inbox, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
 let node: ErlNode;
@@ -29,35 +29,36 @@ afterAll(async () => {
 const alive = (pid: Pid) => node.rpc(remote.name, "erlang", "is_process_alive", [pid]);
 
 test("spawn starts a process on the remote node", async () => {
-  const mb = node.spawnMailbox();
-  const { pid, ref } = await mb.spawn(remote.name, "timer", "sleep", [500]);
+  const mb = inbox(node);
+  const { pid, ref } = await mb.spawnOn(remote.name, "timer", "sleep", [500]);
   expect(pid).toBeInstanceOf(Pid);
   expect(pid.node).toBe(atom(remote.name));
   expect(ref).toBeUndefined();
   expect(await alive(pid)).toBe(true);
-  mb.close();
+  mb.exit();
 });
 
 test("spawn with monitor", async () => {
-  const mb = node.spawnMailbox();
-  const { pid, ref } = await mb.spawn(remote.name, "timer", "sleep", [50], { monitor: true });
+  const mb = inbox(node);
+  const { pid, ref } = await mb.spawnOn(remote.name, "timer", "sleep", [50], { monitor: true });
   expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("DOWN"), ref!, atom("process"), pid, atom("normal")));
-  mb.close();
+  mb.exit();
 });
 
 test("spawn with link", async () => {
-  const mb = node.spawnMailbox();
-  const { pid } = await mb.spawn(remote.name, "erlang", "exit", [atom("boom")], { link: true });
+  const mb = inbox(node);
+  mb.trapExit = true;
+  const { pid } = await mb.spawnOn(remote.name, "erlang", "exit", [atom("boom")], { link: true });
   expect(await mb.receive(undefined, 2000)).toEqual(tuple(atom("EXIT"), pid, atom("boom")));
-  mb.close();
+  mb.exit();
 });
 
 test("spawn on an unknown node", async () => {
-  const mb = node.spawnMailbox();
-  const err = await mb.spawn("nobody@localhost", "erlang", "node").catch((e) => e);
+  const mb = inbox(node);
+  const err = await mb.spawnOn("nobody@localhost", "erlang", "node").catch((e) => e);
   expect(err).toBeInstanceOf(SpawnError);
   expect(err.reason).toBe(atom("noconnection"));
-  mb.close();
+  mb.exit();
 });
 
 test("erpc returns the value", async () => {

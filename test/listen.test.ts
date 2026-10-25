@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { atom, type ErlNode, start, type Term, Tuple, tuple } from "../src/index.ts";
-import { COOKIE, startNode, type TestNode } from "./support/node.ts";
+import { COOKIE, inbox, startNode, type TestNode } from "./support/node.ts";
 
 // `listener` only accepts connections, it never connects anywhere itself.
 // `driver` asks the Elixir node (over rpc) to talk to `listener`, so every
@@ -39,7 +39,7 @@ test("wrong cookie is refused", async () => {
 });
 
 test("remote sends to a registered mailbox", async () => {
-  const mb = listener.spawnMailbox();
+  const mb = inbox(listener);
   mb.register("inbox");
   expect(await rpc("erlang", "send", [tuple(atom("inbox"), atom(LISTENER)), tuple(atom("hi"), 1)])).toEqual(
     tuple(atom("hi"), 1),
@@ -48,11 +48,11 @@ test("remote sends to a registered mailbox", async () => {
   // We are connected as a hidden node.
   expect(await rpc("erlang", "nodes", [atom("hidden")])).toContainEqual(atom(LISTENER));
   expect(await rpc("erlang", "nodes")).toEqual([]);
-  mb.close();
+  mb.exit();
 });
 
 test("GenServer.call into a mailbox", async () => {
-  const mb = listener.spawnMailbox();
+  const mb = inbox(listener);
   mb.register("server");
   void (async () => {
     const msg = (await mb.receive(undefined, 5000)) as Tuple;
@@ -61,21 +61,21 @@ test("GenServer.call into a mailbox", async () => {
   })();
   const res = await rpc("Elixir.GenServer", "call", [tuple(atom("server"), atom(LISTENER)), atom("ping")]);
   expect(res).toEqual(tuple(atom("pong"), atom("ping")));
-  mb.close();
+  mb.exit();
 });
 
 test("remote monitors a registered mailbox by name", async () => {
-  const mb = listener.spawnMailbox();
+  const mb = inbox(listener);
   mb.register("watched");
-  const watcher = driver.spawnMailbox();
+  const watcher = inbox(driver);
   await rpc("Elixir.Helpers", "watch", [tuple(atom("watched"), atom(LISTENER)), watcher.pid]);
   await Bun.sleep(100);
-  mb.close(atom("bye"));
+  mb.exit(atom("bye"));
   expect(await watcher.receive(undefined, 2000)).toEqual(tuple(atom("down"), atom("bye")));
 
   await rpc("Elixir.Helpers", "watch", [tuple(atom("watched"), atom(LISTENER)), watcher.pid]);
   expect(await watcher.receive(undefined, 2000)).toEqual(tuple(atom("down"), atom("noproc")));
-  watcher.close();
+  watcher.exit();
 });
 
 test("the listener can use the incoming connection", async () => {
@@ -84,14 +84,14 @@ test("the listener can use the incoming connection", async () => {
 });
 
 test("register rejects a taken name", () => {
-  const a = listener.spawnMailbox();
-  const b = listener.spawnMailbox();
+  const a = inbox(listener);
+  const b = inbox(listener);
   a.register("taken");
   expect(() => b.register("taken")).toThrow("already registered");
-  a.close();
+  a.exit();
   b.register("taken");
-  expect(listener.whereis("taken")).toBe(b);
-  b.close();
+  expect(listener.whereis("taken")).toEqual(b.pid);
+  b.exit();
 });
 
 test("close unregisters from EPMD", async () => {
@@ -112,7 +112,7 @@ test("simultaneous connect between two listening nodes", async () => {
     await Promise.all([a.connect(b.name.name), b.connect(a.name.name)]);
     expect(a.list()).toEqual([b.name.name]);
     expect(b.list()).toEqual([a.name.name]);
-    const mb = b.spawnMailbox();
+    const mb = inbox(b);
     await a.send(mb.pid, atom("over_one_connection"));
     expect(await mb.receive(undefined, 2000)).toBe(atom("over_one_connection"));
     await a.close();

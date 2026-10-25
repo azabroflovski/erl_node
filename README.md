@@ -37,14 +37,15 @@ await node.call(["Elixir.Counter", APP], atom("inc"));
 await node.rpc(APP, "erlang", "node"); // atom("app@localhost")
 await node.erpc(APP, "erlang", "node"); // same, in a new remote process
 
-// A mailbox has its own pid, so remote processes can reply to it.
-const mb = node.spawnMailbox();
-await mb.send(["echo", APP], tuple(mb.pid, "ping"));
-const reply = await mb.receive(undefined, 5000);
+// A process: a pid, a mailbox and a body. It exits when the body returns.
+node.spawn(async (self) => {
+  await self.send(["echo", APP], tuple(self.pid, "ping"));
+  const reply = await self.receive(undefined, 5000);
 
-// A {:DOWN, ref, :process, object, reason} message arrives when :echo exits.
-const ref = await mb.monitor(["echo", APP]);
-mb.demonitor(ref);
+  // A {:DOWN, ref, :process, object, reason} message arrives when :echo exits.
+  const ref = await self.monitor(["echo", APP]);
+  self.demonitor(ref);
+});
 
 await node.close();
 ```
@@ -60,8 +61,13 @@ The API follows Elixir:
 | `send(name, msg)` for a local name | `node.send(name, msg)` |
 | `GenServer.call(dest, req, timeout)` | `node.call(dest, req, timeout)` |
 | `:rpc.call/5`, `:erpc.call/5` | `node.rpc(...)`, `node.erpc(...)` |
-| `Process.monitor/1`, `Process.link/1` | `mb.monitor(dest)`, `mb.link(pid)` |
-| `Process.register/2` | `mb.register(name)` |
+| `spawn/1` | `node.spawn(async (self) => ...)` |
+| `Node.spawn/4` with `:link`, `:monitor` | `self.spawnOn(node, m, f, args, opts)` |
+| `receive` | `self.receive(match, timeout)` |
+| `Process.monitor/1`, `Process.link/1` | `self.monitor(dest)`, `self.link(pid)` |
+| `Process.register/2`, `Process.whereis/1` | `self.register(name)`, `node.whereis(name)` |
+| `Process.flag(:trap_exit, true)` | `self.trapExit = true` |
+| `exit/1`, `Process.exit/2` | `self.exit(reason)`, `node.exit(pid, reason)` |
 
 One node keeps any number of connections, outgoing and incoming.
 
@@ -89,23 +95,26 @@ Atoms are interned, so `atom("ok") === atom("ok")` and they work as `Map` keys.
 
 - EPMD lookup, handshake version 6 (OTP 23+), ticks.
 - `send` to a pid, a local name or `[name, node]`.
-- Mailboxes with `receive(match, timeout)`.
+- Processes: `node.spawn(fn)` runs `fn(self)` as a process with its own pid
+  and mailbox. It exits with `:normal` when `fn` returns and with
+  `{:js_error, message}` when it throws (the error is logged too).
 - `call` (the gen_server protocol) and `rpc` (through `rex`).
   Output that the remote function writes is discarded. `call` monitors the
   target, so a missing or crashed process fails the call with `CallError`.
 - `erpc` (`:erpc.call`): runs the function in a new process on the remote
   node; exceptions come back as `ErpcError` with the Erlang class and reason.
-- `mailbox.spawn(node, m, f, args, { link, monitor })` starts a process on
+- `self.spawnOn(node, m, f, args, { link, monitor })` starts a process on
   the remote node (`spawn_request`). Spawn requests from BEAM to us are
   answered with `notsup`: the JS node cannot run Erlang code.
-- Links and monitors in both directions. A mailbox behaves like a process
-  that traps exits: exit signals arrive as `{:EXIT, from, reason}`, monitors
-  deliver `{:DOWN, ref, :process, object, reason}`. `mailbox.close(reason)`
-  sends exit signals to linked and monitoring processes. When a connection
-  drops, links and monitors over it fire with `:noconnection`.
+- Links and monitors in both directions, with Erlang's exit rules: a linked
+  process exiting with a non-normal reason takes ours down, unless
+  `trapExit` is set and the signal arrives as `{:EXIT, from, reason}`;
+  `:kill` cannot be trapped. Monitors deliver
+  `{:DOWN, ref, :process, object, reason}`. When a connection drops, links
+  and monitors over it fire with `:noconnection`.
 - Incoming connections after `node.listen()`: the node registers in the local
-  EPMD and accepts handshakes. Mailboxes can be registered under a name
-  (`mb.register("inbox")`), so Erlang code can use `send({:inbox, :"js@host"}, msg)`,
+  EPMD and accepts handshakes. Processes can be registered under a name
+  (`self.register("inbox")`), so Erlang code can use `send({:inbox, :"js@host"}, msg)`,
   monitor `{:inbox, :"js@host"}` or `GenServer.call` it (answer with `node.reply(from, value)`).
 
 The node is hidden, so it shows up in `Node.list(:hidden)` and not in
@@ -128,9 +137,13 @@ import { start } from "erlnode";
 const node = start({ name: "js@localhost", cookie: "secret" });
 await node.listen();
 
-const inbox = node.spawnMailbox();
-inbox.register("inbox");
-const msg = await inbox.receive(); // after send({:inbox, :"js@localhost"}, :hi) in iex
+node.spawn(async (self) => {
+  self.register("inbox");
+  for (;;) {
+    const msg = await self.receive(); // send({:inbox, :"js@localhost"}, :hi) in iex
+    console.log(msg);
+  }
+});
 ```
 
 ## Security

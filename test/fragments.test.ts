@@ -4,7 +4,7 @@ import { Connection } from "../src/connection.ts";
 import { FrameReader } from "../src/framing.ts";
 import { DFLAG } from "../src/handshake.ts";
 import { atom, type ErlNode, start, type Term, Tuple, tuple } from "../src/index.ts";
-import { COOKIE, startNode, type TestNode } from "./support/node.ts";
+import { COOKIE, inbox, startNode, type TestNode } from "./support/node.ts";
 
 let remote: TestNode;
 let node: ErlNode;
@@ -32,16 +32,16 @@ test("large message from BEAM arrives in fragments and is reassembled", async ()
 });
 
 test("large message to BEAM", async () => {
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   const big = [bytes(300_000, 1), atom("tail"), Array.from({ length: 50_000 }, (_, i) => i)];
   await node.send(["echo", remote.name], tuple(mb.pid, big));
   expect(await mb.receive(undefined, 5000)).toEqual(tuple(atom("echo"), big));
   expect(await node.rpc(remote.name, "erlang", "byte_size", [bytes(1_000_000, 3)])).toBe(1_000_000);
-  mb.close();
+  mb.exit();
 });
 
 test("fragments of concurrent senders are kept apart", async () => {
-  const mb = node.spawnMailbox();
+  const mb = inbox(node);
   const size = 2_000_000;
   await node.rpc(remote.name, "Elixir.Helpers", "blast", [mb.pid, [1, 2, 3], size]);
   const got = new Map<Term, Term>();
@@ -50,7 +50,7 @@ test("fragments of concurrent senders are kept apart", async () => {
     got.set(msg.at(0)!, msg.at(1)!);
   }
   for (const tag of [1, 2, 3]) expect(got.get(tag)).toEqual(bytes(size, tag));
-  mb.close();
+  mb.exit();
 });
 
 // Two Connection objects over a local socket pair, to cover both framings
