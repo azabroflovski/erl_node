@@ -78,6 +78,7 @@ The API follows Elixir:
 | `Process.register/2`, `Process.whereis/1` | `self.register(name)`, `node.whereis(name)` |
 | `Process.flag(:trap_exit, true)` | `self.trapExit = true` |
 | `Phoenix.PubSub.subscribe/2` | `self.subscribe(node, pubsub, topic)` |
+| `use GenServer`, `GenServer.start_link/3` | `defineGenServer({...})`, `.start(node, opts)` |
 | `exit/1`, `Process.exit/2` | `self.exit(reason)`, `node.exit(pid, reason)` |
 
 One node keeps any number of connections, outgoing and incoming.
@@ -120,6 +121,51 @@ await users.get(1);                   // :erpc.call(APP, MyApp.Users, :get, [1])
 // Start a process again after a crash, like a :transient supervisor child.
 node.spawn(async (self) => { /* ... */ }, { restart: { delay: 1000 } });
 ```
+
+### defineGenServer
+
+For a server with setup, cleanup or state worth naming, describe it once
+the way Elixir does and start it as many times as needed:
+
+```ts
+import { atom, defineGenServer, toJS, type Tuple } from "erlnode";
+
+const Rates = defineGenServer({
+  init: async (self) => ({
+    rates: await loadRates(),
+    timer: setInterval(() => node.send(self.pid, atom("refresh")), 60_000),
+  }),
+  // GenServer.call(Rates, {:get, "EUR"})
+  handleCall: (req, s) => {
+    const [op, cur] = req as Tuple;
+    if (op === atom("get")) return { reply: s.rates[toJS<string>(cur!)] ?? null, state: s };
+  },
+  // GenServer.cast(Rates, {:set, "EUR", 1.1})
+  handleCast: (req, s) => {
+    const [op, cur, rate] = req as Tuple;
+    if (op === atom("set")) s.rates[toJS<string>(cur!)] = rate as number;
+    return s;
+  },
+  // send(Rates, :refresh)
+  handleInfo: async (msg, s) => (msg === atom("refresh") ? { ...s, rates: await loadRates() } : s),
+  terminate: (_reason, s) => clearInterval(s.timer),
+});
+
+await Rates.start(node, { name: "Rates", restart: true });
+```
+
+- `start` resolves once `init` is done and rejects if it throws; a failed
+  first start is not restarted.
+- `handleCall` returns `{ reply, state }`; returning nothing means the
+  request has no clause, and the server crashes so the caller gets an
+  error instead of waiting for a timeout. `handleCast` and `handleInfo`
+  return the new state.
+- `terminate` runs whenever the process ends, killed or not, so it is the
+  place for cleanup.
+- State goes in and out of the callbacks, so they can be tested as plain
+  functions, without a node.
+
+`serve` is the short form for servers that need none of this.
 
 - `serve` handles one message at a time. A handler that throws crashes the
   process and the pending call fails on the Elixir side; `serve(name,
@@ -184,6 +230,9 @@ const user = toJS<User>(await node.erpc(APP, "MyApp.Users", "get", [1]));
 - Processes: `node.spawn(fn)` runs `fn(self)` as a process with its own pid
   and mailbox. It exits with `:normal` when `fn` returns and with
   `{:js_error, message}` when it throws (the error is logged too).
+  Messages between JS processes are copied as if they went over the wire:
+  the receiver gets the same terms a remote process would, and nothing is
+  shared with the sender.
 - `call` (the gen_server protocol) and `rpc` (through `rex`).
   Output that the remote function writes is discarded. `call` monitors the
   target, so a missing or crashed process fails the call with `CallError`.
@@ -315,7 +364,7 @@ node.spawn(async (self) => {
 
 ### Answering GenServer.call and GenServer.cast
 
-`node.serve` does this for you. By hand, a JS process can stand in for a GenServer: `GenServer.call` arrives as
+`defineGenServer` and `node.serve` do this for you. By hand, a JS process can stand in for a GenServer: `GenServer.call` arrives as
 `{:"$gen_call", from, request}` and is answered with `node.reply(from, value)`,
 `GenServer.cast` arrives as `{:"$gen_cast", request}`. State is a plain variable.
 
