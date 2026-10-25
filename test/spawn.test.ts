@@ -122,3 +122,13 @@ test("node.module calls remote functions through erpc", async () => {
   // Awaiting the proxy itself must not hang.
   expect(await lists).toBe(lists);
 });
+
+test("node.module typed by an interface", async () => {
+  interface Lists {
+    seq(from: number, to: number): Promise<number[]>;
+    reverse(list: number[]): Promise<number[]>;
+  }
+  const lists = node.module<Lists>(remote.name, "lists");
+  const seq: number[] = await lists.seq(1, 3);
+  expect(await lists.reverse(seq)).toEqual([3, 2, 1]);
+});

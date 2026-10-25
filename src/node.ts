@@ -15,6 +15,9 @@ import { isDown, Process, SpawnError, TimeoutError } from "./process.ts";
  */
 export type Dest = Pid | string | [name: string, node: string];
 
+/** What `node.module<T>` returns: functions named by `T`, or `T` itself when it is an interface. */
+export type RemoteModule<T> = [T] extends [string] ? { [F in T & string]: (...args: Term[]) => Promise<Term> } : T;
+
 export interface NodeOptions {
   /** Our node name, e.g. `js@localhost`. */
   name: string;
@@ -173,6 +176,7 @@ export class ErlNode {
     for (const f of this.arrivals.get(remote) ?? []) f(conn);
     this.arrivals.delete(remote);
   }
+
 
   /**
    * Accepts connections from other nodes and registers this node in the
@@ -617,14 +621,18 @@ export class ErlNode {
    *
    * Names with `?` or `!` need brackets: `users["valid?"](x)`. Nothing is
    * checked up front: a missing function fails when called, with `ErpcError`.
-   * List the function names to have them typed as always present:
-   * `node.module<"get" | "list">(APP, "MyApp.Users")`.
+   *
+   * The type parameter is optional and only gives types, nothing is checked
+   * at run time. It is either a union of function names,
+   * `node.module<"get" | "list">(...)`, or an interface whose methods return
+   * promises, `node.module<Users>(...)` with
+   * `interface Users { get(id: number): Promise<Term> }`.
    */
-  module<Fn extends string = string>(
+  module<T extends string | object = string>(
     remote: string,
     mod: string,
     opts: { timeout?: number } = {},
-  ): { [F in Fn]: (...args: Term[]) => Promise<Term> } {
+  ): RemoteModule<T> {
     return new Proxy(
       {},
       {
@@ -634,7 +642,7 @@ export class ErlNode {
           return (...args: Term[]) => this.erpc(remote, mod, fn, args, opts.timeout);
         },
       },
-    ) as { [F in Fn]: (...args: Term[]) => Promise<Term> };
+    ) as RemoteModule<T>;
   }
 
   /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
