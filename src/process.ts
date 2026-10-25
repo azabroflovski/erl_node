@@ -57,7 +57,7 @@ export class Process {
   /** Linked pids by key; `unlinking` holds the id of a pending UNLINK_ID. */
   readonly links = new Map<string, { pid: Pid; unlinking?: number }>();
   /** Monitors this process owns, by ref key. */
-  readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string }>();
+  readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string; local?: Process }>();
   /** Remote processes monitoring this process, by ref key. */
   readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
   /** Spawn requests waiting for SPAWN_REPLY, by request id key. */
@@ -126,13 +126,21 @@ export class Process {
   /** Links to `pid`. If its node cannot be reached, `{:EXIT, pid, :noconnection}` arrives. */
   async link(pid: Pid): Promise<void> {
     if (!this.alive) throw new Error("process exited");
+    if (pid.equals(this.pid)) return;
     const existing = this.links.get(pid.key);
     if (existing && existing.unlinking === undefined) return;
+    if (pid.node === this.node.name) {
+      const other = this.node.lookup(pid);
+      if (!other) return this.exitSignal(pid, atom("noproc"), false);
+      this.links.set(pid.key, { pid });
+      other.links.set(this.pid.key, { pid: this.pid });
+      return;
+    }
     this.links.set(pid.key, { pid });
     const conn = await reach(this.node, pid.node.name);
     if (!conn) {
       this.links.delete(pid.key);
-      this.deliver(tuple(EXIT, pid, atom("noconnection")));
+      this.exitSignal(pid, atom("noconnection"), false);
       return;
     }
     conn.trySend(tuple(OP.LINK, this.pid, pid));
@@ -142,6 +150,11 @@ export class Process {
   async unlink(pid: Pid): Promise<void> {
     const link = this.links.get(pid.key);
     if (!link || link.unlinking !== undefined) return;
+    if (pid.node === this.node.name) {
+      this.links.delete(pid.key);
+      this.node.lookup(pid)?.links.delete(this.pid.key);
+      return;
+    }
     const conn = this.node.connection(pid.node.name);
     if (!conn) {
       this.links.delete(pid.key);
@@ -160,6 +173,16 @@ export class Process {
     const ref = this.node.makeRef();
     const proc = target instanceof Pid ? target : atom(target[0]);
     const nodeName = target instanceof Pid ? target.node.name : target[1];
+    if (nodeName === this.node.name.name) {
+      const other = this.node.lookup(target instanceof Pid ? target : target[0]);
+      if (!other) {
+        this.deliver(tuple(DOWN, ref, atom("process"), downObject(proc, nodeName), atom("noproc")));
+        return ref;
+      }
+      this.monitors.set(ref.key, { ref, target: proc, node: nodeName, local: other });
+      other.monitoredBy.set(ref.key, { ref, pid: this.pid, proc });
+      return ref;
+    }
     const conn = await reach(this.node, nodeName);
     if (!conn) {
       this.deliver(tuple(DOWN, ref, atom("process"), downObject(proc, nodeName), atom("noconnection")));
@@ -273,7 +296,8 @@ export class Process {
     this.queue = this.queue.filter((m) => !isDown(m, ref));
     if (!mon) return;
     this.monitors.delete(ref.key);
-    this.node.connection(mon.node)?.trySend(tuple(OP.DEMONITOR_P, this.pid, mon.target, ref));
+    if (mon.local) mon.local.monitoredBy.delete(ref.key);
+    else this.node.connection(mon.node)?.trySend(tuple(OP.DEMONITOR_P, this.pid, mon.target, ref));
   }
 
   /**
@@ -285,11 +309,16 @@ export class Process {
     if (!this.alive) return;
     this.alive = false;
     for (const { ref } of [...this.monitors.values()]) this.demonitor(ref);
+    // Signals to local processes are delivered after this exit completes,
+    // as they would be asynchronous in Erlang.
     for (const { pid, unlinking } of this.links.values()) {
-      if (unlinking === undefined) this.node.connection(pid.node.name)?.exit(this.pid, pid, reason);
+      if (unlinking !== undefined) continue;
+      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.linkExit(this.pid, reason));
+      else this.node.connection(pid.node.name)?.exit(this.pid, pid, reason);
     }
     for (const { ref, pid, proc } of this.monitoredBy.values()) {
-      this.node.connection(pid.node.name)?.monitorExit(proc, pid, ref, reason);
+      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.monitorDown(ref, reason));
+      else this.node.connection(pid.node.name)?.monitorExit(proc, pid, ref, reason);
     }
     this.links.clear();
     this.monitoredBy.clear();

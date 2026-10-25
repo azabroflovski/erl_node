@@ -360,6 +360,11 @@ export class ErlNode {
     this.names.set(name, p);
   }
 
+  /** The live process on this node with this pid or registered name. */
+  lookup(target: Pid | string): Process | undefined {
+    return typeof target === "string" ? this.names.get(target) : this.local(target);
+  }
+
   /** The pid registered under `name`, like `Process.whereis/1`. */
   whereis(name: string): Pid | undefined {
     return this.names.get(name)?.pid;
