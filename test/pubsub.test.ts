@@ -116,3 +116,13 @@ test("a failing handler is logged and the subscription goes on", async () => {
   log.mockRestore();
   await off();
 });
+
+test("node.broadcast publishes to Elixir and JS subscribers", async () => {
+  const got: Term[] = [];
+  const off = node.subscribe(remote.name, "TestPubSub", "from_js", (e) => void got.push(e));
+  await eventually(async () => (await subscribers("from_js")) === 1);
+  await node.broadcast(remote.name, "TestPubSub", "from_js", tuple(atom("created"), 7));
+  await eventually(() => got.length === 1);
+  expect(got).toEqual([tuple(atom("created"), 7)]);
+  await off();
+});

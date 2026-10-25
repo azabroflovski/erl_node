@@ -397,6 +397,16 @@ export class ErlNode {
   }
 
   /**
+   * Publishes `msg` on Phoenix.PubSub `topic` of `remote`, like
+   * `Phoenix.PubSub.broadcast(MyApp.PubSub, topic, msg)`: subscribers on every
+   * node of the cluster get it. Throws if PubSub answers `{:error, reason}`.
+   */
+  async broadcast(remote: string, pubsub: string, topic: string, msg: Term): Promise<void> {
+    const res = await this.erpc(remote, "Phoenix.PubSub", "broadcast", [atom(erlangName(pubsub)), topic, msg]);
+    if (res !== atom("ok")) throw new Error(`broadcast to ${topic} failed: ${format(res)}`);
+  }
+
+  /**
    * Calls `handler` for every broadcast on Phoenix.PubSub `topic` of `remote`:
    * `node.subscribe(APP, "MyApp.PubSub", "orders", (event) => ...)`.
    * When the subscription or the connection is lost, it subscribes again
