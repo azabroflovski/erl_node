@@ -18,7 +18,8 @@ import {
 import { runElixir } from "./support/node.ts";
 
 // Terms are rendered by Elixir itself; each one must survive decode → encode
-// byte for byte. Integral floats are left out: they decode to plain numbers
+// byte for byte. `minor_version: 2` asks for UTF-8 atoms, the default since
+// OTP 26; older releases write latin-1 atoms otherwise. Integral floats are left out: they decode to plain numbers
 // and go back out as integers (see the `float()` test below).
 const TERMS = [
   ":ok",
@@ -80,7 +81,7 @@ let rendered: string[];
 beforeAll(async () => {
   const code = `
     for t <- [${TERMS.join(", ")}] do
-      IO.puts(Base.encode16(:erlang.term_to_binary(t), case: :lower))
+      IO.puts(Base.encode16(:erlang.term_to_binary(t, minor_version: 2), case: :lower))
     end
   `;
   rendered = (await runElixir(code, ["--sname", "etf_probe@localhost"])).trim().split("\n");
@@ -90,7 +91,9 @@ describe("roundtrip against :erlang.term_to_binary", () => {
   TERMS.forEach((src, i) => {
     test(src.length > 50 ? src.slice(0, 50) + "…" : src, () => {
       const bytes = Buffer.from(rendered[i]!, "hex");
-      expect(hex(encode(decode(bytes)))).toBe(hex(bytes));
+      // Before OTP 26 ports are NEW_PORT_EXT (89); we always write V4_PORT_EXT, like OTP 26+.
+      if (bytes[1] === 89) expect(decode(encode(decode(bytes)))).toEqual(decode(bytes));
+      else expect(hex(encode(decode(bytes)))).toBe(hex(bytes));
     });
   });
 });
@@ -145,7 +148,7 @@ describe("encode matches Elixir", () => {
       encode(tuple(atom("ok"), "hi", float(1), { a: 1 }, new Map([["k", [atom("x")]]]), false, -(2n ** 70n))),
     );
     const theirs = await runElixir(
-      `IO.puts(Base.encode16(:erlang.term_to_binary({:ok, "hi", 1.0, %{a: 1}, %{"k" => [:x]}, false, -(2 ** 70)}), case: :lower))`,
+      `IO.puts(Base.encode16(:erlang.term_to_binary({:ok, "hi", 1.0, %{a: 1}, %{"k" => [:x]}, false, -(2 ** 70)}, minor_version: 2), case: :lower))`,
     );
     expect(ours).toBe(theirs.trim());
   });
