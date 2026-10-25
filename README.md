@@ -79,6 +79,44 @@ The API follows Elixir:
 
 One node keeps any number of connections, outgoing and incoming.
 
+## High-level API
+
+Shortcuts for common jobs, built on the API above. Each one is a process
+with a loop you could write yourself; the sections below show how.
+
+```ts
+// Listen to a Phoenix.PubSub topic. Subscribes again if the connection or
+// the subscription is lost; returns a function that unsubscribes.
+const off = node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => {
+  console.log(event);
+});
+
+// Answer GenServer.call / GenServer.cast to {:prices, :"js@localhost"}.
+let price = 0;
+node.serve("prices", {
+  call: (req) => price,               // the return value is the reply
+  cast: (req) => { price = (req as Tuple).at(1) as number; },
+  info: (msg) => console.log(msg),    // any other message
+});
+
+// Call functions of a remote module through :erpc. Listing the names
+// is optional and only gives types.
+const users = node.module<"get" | "list">(APP, "Elixir.MyApp.Users");
+await users.get(1);                   // :erpc.call(APP, MyApp.Users, :get, [1])
+
+// Start a process again after a crash, like a :transient supervisor child.
+node.spawn(async (self) => { /* ... */ }, { restart: { delay: 1000 } });
+```
+
+- `serve` handles one message at a time. A handler that throws crashes the
+  process and the pending call fails on the Elixir side; `serve(name,
+  handlers, { restart })` brings it back.
+- `module` checks nothing up front: a missing function fails when called.
+  Names with `?` or `!` need brackets: `users["valid?"](x)`.
+- `restart` does not restart after `:normal`, `:shutdown` or
+  `{:shutdown, _}`. Each run gets a new pid; register a name for a stable
+  address.
+
 ## Terms
 
 | Erlang | JS (decode) | JS (encode) |
@@ -234,9 +272,31 @@ process exits or the connection drops, the relay exits and the subscription
 is gone. If the relay dies, the JS process gets the exit signal. Both
 `relay` and `subscribe` return `stop()` to unsubscribe and keep the process.
 
+When the relay dies or the connection drops, the JS process gets an exit
+signal. To keep listening, trap it and subscribe again. This is what
+`node.subscribe` does:
+
+```ts
+node.spawn(async (self) => {
+  self.trapExit = true;
+  for (;;) {
+    try {
+      await self.subscribe(APP, "Elixir.MyApp.PubSub", "orders");
+      for await (const msg of self) {
+        if (msg instanceof Tuple && msg.at(0) === atom("EXIT")) break; // subscription lost
+        console.log(msg);
+      }
+    } catch {
+      // node unreachable: wait and try again
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+});
+```
+
 ### Answering GenServer.call and GenServer.cast
 
-A JS process can stand in for a GenServer: `GenServer.call` arrives as
+`node.serve` does this for you. By hand, a JS process can stand in for a GenServer: `GenServer.call` arrives as
 `{:"$gen_call", from, request}` and is answered with `node.reply(from, value)`,
 `GenServer.cast` arrives as `{:"$gen_cast", request}`. State is a plain variable.
 
