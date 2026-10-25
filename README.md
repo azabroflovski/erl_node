@@ -1,9 +1,16 @@
 # erlnode
 
-A JS/TS node for BEAM. It connects to an Erlang or Elixir node over the
-native distribution protocol, without HTTP or WebSocket in between.
+![OTP 23–29](https://img.shields.io/badge/OTP-23%E2%80%9329-A90533)
+![Elixir 1.14–1.20](https://img.shields.io/badge/Elixir-1.14%E2%80%931.20-4B275F)
+![Bun](https://img.shields.io/badge/runtime-Bun-black)
+![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Runtime dependencies: none. Tested with Bun against OTP 23 to 29.
+A JS/TS node for BEAM. It connects to an Erlang or Elixir node over the
+native distribution protocol.
+
+Zero dependencies: the term codec and the protocol are written from scratch.
+Tested with Bun against OTP 23 to 29.
 
 ## Example
 
@@ -174,6 +181,26 @@ node.spawn(async (self) => {
   }
 });
 ```
+
+## Compatibility
+
+The full test suite passes against live nodes of each of these releases
+(last run on 2026-10-25 with Bun 1.4.2):
+
+| OTP | Elixir |
+|---|---|
+| 23.3 | 1.14 |
+| 24.3 | 1.14 |
+| 25.3 | 1.14 |
+| 26.2 | 1.15 |
+| 27.3 | 1.18 |
+| 28.5 | 1.20 |
+| 29.1 | 1.18 |
+
+To repeat it: `scripts/test-otp.sh` (needs nix).
+
+One known gap: ports are always encoded as `V4_PORT_EXT`, which OTP 23 does
+not read, so a port cannot be sent to an OTP 23 node.
 
 ## Security
 
