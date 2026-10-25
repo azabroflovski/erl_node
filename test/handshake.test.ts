@@ -30,3 +30,17 @@ test("unknown node", async () => {
   const node = start({ name: "hs_js2@localhost", cookie: COOKIE });
   await expect(node.connect("nobody@localhost")).rejects.toThrow("not registered");
 });
+
+test("a restarted node replaces its stale connection (BEAM answers alive)", async () => {
+  const old = start({ name: "hs_restart@localhost", cookie: COOKIE });
+  await old.connect(remote.name);
+  const oldConn = old.connection(remote.name)!;
+  // Same name, new instance, while BEAM still holds the old connection.
+  const fresh = start({ name: "hs_restart@localhost", cookie: COOKIE });
+  await fresh.connect(remote.name);
+  expect(await fresh.rpc(remote.name, "erlang", "nodes", [atom("hidden")])).toEqual([atom("hs_restart@localhost")]);
+  await oldConn.done;
+  expect(old.list()).toEqual([]);
+  await fresh.close();
+  await old.close();
+});

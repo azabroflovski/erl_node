@@ -100,7 +100,10 @@ export async function handshake(
   const status = await read(reader, "status");
   if (status[0] !== 0x73) throw new HandshakeError("expected status message");
   const statusText = status.subarray(1).toString("latin1");
-  if (statusText !== "ok" && statusText !== "ok_simultaneous") {
+  // "alive": the remote still has a connection to a node with our name and
+  // asks whether this attempt replaces it. We are dialing, so it does.
+  if (statusText === "alive") socket.write(frame(2, Buffer.from("strue", "latin1")));
+  else if (statusText !== "ok" && statusText !== "ok_simultaneous") {
     const err = new HandshakeError(`remote node refused the connection: ${statusText}`);
     err.status = statusText;
     throw err;

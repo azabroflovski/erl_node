@@ -128,3 +128,21 @@ test("simultaneous connect between two listening nodes", async () => {
     await b.close();
   }
 });
+
+test("a restarted peer replaces its stale connection (we answer alive)", async () => {
+  const a = start({ name: "alive_a@localhost", cookie: COOKIE });
+  await a.listen({ host: "127.0.0.1" });
+  const old = start({ name: "alive_b@localhost", cookie: COOKIE });
+  await old.connect(a.name.name);
+  const oldConn = old.connection(a.name.name)!;
+  const fresh = start({ name: "alive_b@localhost", cookie: COOKIE });
+  await fresh.connect(a.name.name);
+  await oldConn.done;
+  expect(a.list()).toEqual(["alive_b@localhost"]);
+  const p = inbox(a);
+  await fresh.send(p.pid, atom("from_fresh"));
+  expect(await p.receive(undefined, 2000)).toBe(atom("from_fresh"));
+  await fresh.close();
+  await old.close();
+  await a.close();
+});

@@ -100,3 +100,13 @@ test("spawn_request from BEAM to us is refused", async () => {
     tuple(atom("error"), atom("notsup")),
   );
 });
+
+test("erpc timeout covers a node that never answers the spawn request", async () => {
+  const silent = start({ name: "spawn_silent@localhost", cookie: COOKIE });
+  await silent.listen({ host: "127.0.0.1" });
+  (silent as unknown as { dispatch: () => void }).dispatch = () => {};
+  const started = Date.now();
+  await expect(node.erpc(silent.name.name, "erlang", "node", [], 200)).rejects.toBeInstanceOf(TimeoutError);
+  expect(Date.now() - started).toBeLessThan(1000);
+  await silent.close();
+});

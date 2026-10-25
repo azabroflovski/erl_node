@@ -5,7 +5,7 @@ import { portPlease, register, type Registration } from "./epmd.ts";
 import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
-import { isDown, Process, SpawnError } from "./process.ts";
+import { isDown, Process, SpawnError, TimeoutError } from "./process.ts";
 
 /**
  * Where a message goes, as in Elixir's `send/2`: a pid, a name registered on
@@ -470,12 +470,15 @@ export class ErlNode {
     const mb = this.process();
     try {
       const res = this.makeRef();
-      const spawned = await mb
-        .spawnOn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true })
-        .catch((err) => {
-          throw err instanceof SpawnError ? new ErpcError("error", tuple(atom("erpc"), err.reason)) : err;
-        });
-      const down = (await mb.receive((msg) => isDown(msg, spawned.ref!), timeout)) as Tuple;
+      const deadline = Date.now() + timeout;
+      const spawned = await withTimeout(
+        mb.spawnOn(node, "erpc", "execute_call", [res, atom(m), atom(f), args], { monitor: true }),
+        timeout,
+      ).catch((err) => {
+        throw err instanceof SpawnError ? new ErpcError("error", tuple(atom("erpc"), err.reason)) : err;
+      });
+      const left = Math.max(0, deadline - Date.now());
+      const down = (await mb.receive((msg) => isDown(msg, spawned.ref!), left)) as Tuple;
       const reason = down.at(4)!;
       // erpc:execute_call exits with {Res, Class, Reason} or {Res, error, Reason, Stack}.
       if (reason instanceof Tuple && res.equals(reason.at(0))) {
@@ -501,6 +504,17 @@ export class ErlNode {
     const conns = await Promise.allSettled(this.connections.values());
     for (const c of conns) if (c.status === "fulfilled") c.value.close();
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (!Number.isFinite(ms)) return promise;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(`no reply within ${ms} ms`)), ms);
+    promise.then(
+      (v) => (clearTimeout(timer), resolve(v)),
+      (e) => (clearTimeout(timer), reject(e)),
+    );
+  });
 }
 
 function isOutputRequest(req: Term): boolean {
