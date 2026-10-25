@@ -12,6 +12,7 @@ import {
   Pid,
   Port,
   Ref,
+  type Term,
   toJS,
   Tuple,
   tuple,
@@ -209,6 +210,13 @@ describe("toJS", () => {
     });
     expect(owner).toBeInstanceOf(Pid);
     expect(JSON.parse(JSON.stringify(rest.nested))).toEqual({ key: { "1": "one" } });
+  });
+
+  test("takes the expected type", () => {
+    type User = { name: string; roles: string[] };
+    const user = toJS<User>(new Map<Term, Term>([[atom("name"), "Bob"], [atom("roles"), [atom("admin")]]]));
+    expect(user.name.toUpperCase()).toBe("BOB");
+    expect(user.roles).toEqual(["admin"]);
   });
 
   test("maps with keys that are not strings stay Maps", () => {

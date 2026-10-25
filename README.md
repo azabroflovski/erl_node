@@ -156,9 +156,12 @@ call it:
 ```ts
 import { toJS } from "erlnode";
 
-const user = toJS(await node.rpc(APP, "Elixir.MyApp.Users", "get", [1]));
+type User = { name: string; roles: string[]; manager: string | null };
+
+const user = toJS<User>(await node.rpc(APP, "Elixir.MyApp.Users", "get", [1]));
 // %{name: "Bob", roles: [:admin], manager: nil}
 // → { name: "Bob", roles: ["admin"], manager: null }
+// The type parameter only saves a cast; nothing checks the data against it.
 ```
 
 ## What works

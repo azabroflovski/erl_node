@@ -671,8 +671,15 @@ export function format(t: Term): string {
  *
  * `encode(toJS(term))` gives back an equal term except that tuples come
  * back as lists and atoms as binaries.
+ *
+ * `T` names the shape you expect, `toJS<User>(term)`, to skip a cast. It is
+ * not checked.
  */
-export function toJS(t: Term): unknown {
+export function toJS<T = unknown>(t: Term): T {
+  return plain(t) as T;
+}
+
+function plain(t: Term): unknown {
   if (t === null || typeof t === "number" || typeof t === "bigint" || typeof t === "boolean") return t;
   if (typeof t === "string") return t;
   if (t instanceof Atom) return t.name === "nil" ? null : t.name;
@@ -684,10 +691,10 @@ export function toJS(t: Term): unknown {
       return t;
     }
   }
-  if (t instanceof Tuple) return t.elements.map(toJS);
-  if (Array.isArray(t)) return t.map(toJS);
+  if (t instanceof Tuple) return t.elements.map(plain);
+  if (Array.isArray(t)) return t.map(plain);
   if (t instanceof Map) {
-    const entries = [...t].map(([k, v]) => [toJS(k), toJS(v)] as const);
+    const entries = [...t].map(([k, v]) => [plain(k), plain(v)] as const);
     if (entries.every(([k]) => typeof k === "string" || typeof k === "number")) {
       return Object.fromEntries(entries);
     }
@@ -704,5 +711,5 @@ export function toJS(t: Term): unknown {
   ) {
     return t;
   }
-  return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, toJS(v)]));
+  return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, plain(v)]));
 }
