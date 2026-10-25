@@ -23,3 +23,4 @@ export { portPlease } from "./epmd.ts";
 export { HandshakeError } from "./handshake.ts";
 export { type Process, RelayError, SpawnError, type Spawned, TimeoutError } from "./process.ts";
 export { CallError, type Dest, type ErlNode, ErpcError, type NodeOptions, start } from "./node.ts";
+export { defineGenServer, type GenServer, type GenServerSpec } from "./genserver.ts";
