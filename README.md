@@ -3,7 +3,7 @@
 A JS/TS node for BEAM. It connects to an Erlang or Elixir node over the
 native distribution protocol, without HTTP or WebSocket in between.
 
-Runtime dependencies: none. Tested with Bun against OTP 28.
+Runtime dependencies: none. Tested with Bun against OTP 23 to 29.
 
 ## Example
 
@@ -189,3 +189,7 @@ bun test
 
 Tests start real Elixir nodes, so `elixir` and `epmd` must be on the PATH.
 `ERLNODE_LONG=1 bun test` also runs a 3 minute keepalive test.
+
+`scripts/test-otp.sh` runs the suite against OTP 23 to 29 with nix
+(`scripts/test-otp.sh 25 26` for some of them). CI runs OTP 24 to 29;
+GitHub's runners no longer support OTP 23.
