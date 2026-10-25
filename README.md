@@ -136,22 +136,41 @@ Also:
 
 Not supported yet: TLS distribution, the atom cache.
 
-## Receiving connections
+## Receiving messages from Elixir
+
+A JS process reads its mailbox with `for await`. Elixir can reach it in two ways.
+
+By a name registered on the JS node:
 
 ```ts
-import { start } from "erlnode";
+import { atom, start, tuple } from "erlnode";
 
 const node = start({ name: "js@localhost", cookie: "secret" });
-await node.listen();
+await node.connect("app@localhost");
 
 node.spawn(async (self) => {
-  self.register("inbox");
-  for (;;) {
-    const msg = await self.receive(); // send({:inbox, :"js@localhost"}, :hi) in iex
-    console.log(msg);
+  self.register("updates");
+  for await (const msg of self) {
+    console.log("from elixir:", msg); // send({:updates, :"js@localhost"}, {:price, 42})
   }
 });
 ```
+
+By pid: the JS process sends its pid first, Elixir keeps it and sends to it
+later. For Elixir it is an ordinary remote pid: `send`, `Process.monitor` and
+`Process.link` work on it, and `:DOWN` arrives when the JS process exits or
+the connection drops.
+
+```ts
+node.spawn(async (self) => {
+  await self.send(["Elixir.Prices", "app@localhost"], tuple(atom("subscribe"), self.pid));
+  for await (const msg of self) console.log(msg);
+});
+```
+
+Messages travel over the connection the JS node opened. If Elixir has to
+connect first (we never connected, or the connection dropped), call
+`node.listen()` so the JS node accepts connections.
 
 ### Answering GenServer.call and GenServer.cast
 
@@ -170,8 +189,8 @@ await node.listen();
 node.spawn(async (self) => {
   self.register("counter");
   let count = 0;
-  for (;;) {
-    const [tag, a, b] = ((await self.receive()) as Tuple).elements;
+  for await (const msg of self) {
+    const [tag, a, b] = (msg as Tuple).elements;
     if (tag === atom("$gen_call") && b === atom("inc")) {
       await node.reply(a!, ++count);
     } else if (tag === atom("$gen_cast")) {

@@ -98,6 +98,21 @@ export class Process {
     });
   }
 
+  /**
+   * Every incoming message, in order: `for await (const msg of self)`.
+   * The loop ends when the process exits.
+   */
+  async *[Symbol.asyncIterator](): AsyncGenerator<Term> {
+    while (this.alive) {
+      try {
+        yield await this.receive();
+      } catch (err) {
+        if (!this.alive) return;
+        throw err;
+      }
+    }
+  }
+
   /** Registers this process under `name` on its node, like `Process.register/2`. */
   register(name: string) {
     this.node.register(name, this);

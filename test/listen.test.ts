@@ -56,8 +56,8 @@ test("GenServer.call and GenServer.cast into a JS process (README example)", asy
   const pid = listener.spawn(async (self) => {
     self.register("counter");
     let count = 0;
-    for (;;) {
-      const [tag, a, b] = ((await self.receive()) as Tuple).elements;
+    for await (const msg of self) {
+      const [tag, a, b] = (msg as Tuple).elements;
       if (tag === atom("$gen_call") && b === atom("inc")) {
         await listener.reply(a!, ++count);
       } else if (tag === atom("$gen_cast")) {

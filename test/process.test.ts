@@ -124,3 +124,37 @@ test("register and whereis", async () => {
   await Bun.sleep(10);
   expect(node.whereis("worker")).toBeUndefined();
 });
+
+test("for await reads messages in order", async () => {
+  const got: Term[] = [];
+  const done = new Promise<void>((resolve) => {
+    node.spawn(async (self) => {
+      self.register("iter");
+      for await (const msg of self) {
+        got.push(msg);
+        if (got.length === 3) break;
+      }
+      resolve();
+    });
+  });
+  for (const n of [1, 2, 3]) await node.send("iter", n);
+  await done;
+  expect(got).toEqual([1, 2, 3]);
+  await Bun.sleep(10); // the process exits right after its body returns
+  expect(node.whereis("iter")).toBeUndefined();
+});
+
+test("for await ends quietly when the process is killed", async () => {
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  let ended!: () => void;
+  const finished = new Promise<void>((r) => (ended = r));
+  const pid = node.spawn(async (self) => {
+    for await (const _ of self) {
+    }
+    ended();
+  });
+  await node.exit(pid, atom("kill"));
+  await finished;
+  expect(log).not.toHaveBeenCalled();
+  log.mockRestore();
+});
