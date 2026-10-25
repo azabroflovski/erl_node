@@ -163,3 +163,16 @@ test("restart: node.close() stops restarting", async () => {
   await Bun.sleep(50);
   expect(runs).toBe(1);
 });
+
+test("local messages are copies, as if they came over the wire", async () => {
+  const p = inbox(node);
+  const original = { list: [1, 2], text: "hi" };
+  await node.send(p.pid, original);
+  original.list.push(3);
+  const got = (await p.receive(undefined, 500)) as Map<unknown, unknown>;
+  const enc = (s: string) => new TextEncoder().encode(s);
+  expect(got).toEqual(new Map<unknown, unknown>([[enc("list"), [1, 2]], [enc("text"), enc("hi")]]));
+  await node.send(p.pid, null);
+  expect(await p.receive(undefined, 500)).toBe(atom("nil"));
+  p.exit();
+});

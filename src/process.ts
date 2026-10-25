@@ -1,6 +1,6 @@
 import { OP } from "./connection.ts";
 import { DFLAG } from "./handshake.ts";
-import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
+import { Atom, atom, copy, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import type { Connection } from "./connection.ts";
 import { erlangName } from "./names.ts";
 import type { Dest, ErlNode } from "./node.ts";
@@ -316,14 +316,15 @@ export class Process {
     this.exitReason = reason;
     for (const { ref } of [...this.monitors.values()]) this.demonitor(ref);
     // Signals to local processes are delivered after this exit completes,
-    // as they would be asynchronous in Erlang.
+    // as they would be asynchronous in Erlang, with a copy of the reason.
+    const localReason = copy(reason);
     for (const { pid, unlinking } of this.links.values()) {
       if (unlinking !== undefined) continue;
-      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.linkExit(this.pid, reason));
+      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.linkExit(this.pid, localReason));
       else this.node.connection(pid.node.name)?.exit(this.pid, pid, reason);
     }
     for (const { ref, pid, proc } of this.monitoredBy.values()) {
-      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.monitorDown(ref, reason));
+      if (pid.node === this.node.name) queueMicrotask(() => this.node.lookup(pid)?.monitorDown(ref, localReason));
       else this.node.connection(pid.node.name)?.monitorExit(proc, pid, ref, reason);
     }
     this.links.clear();

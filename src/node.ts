@@ -2,7 +2,7 @@ import { randomInt } from "node:crypto";
 import { createServer, type Server, connect as tcpConnect, type Socket } from "node:net";
 import { Connection, OP } from "./connection.ts";
 import { portPlease, register, type Registration } from "./epmd.ts";
-import { Atom, atom, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
+import { Atom, atom, copy, format, Pid, Ref, type Term, Tuple, tuple } from "./etf.ts";
 import { FrameReader } from "./framing.ts";
 import { acceptHandshake, DFLAG, handshake, HandshakeError } from "./handshake.ts";
 import { debug, debugEnabled } from "./debug.ts";
@@ -347,7 +347,7 @@ export class ErlNode {
         // A process killed by a signal sees its pending receive fail; that is not a crash.
         if (!p.alive) return;
         console.error(`erlnode: process ${p.pid} crashed:`, err);
-        p.exit(tuple(atom("js_error"), err instanceof Error ? err.message : String(err)));
+        p.exit(jsErrorReason(err));
       }
     })();
     return p.pid;
@@ -442,7 +442,7 @@ export class ErlNode {
    * process unconditionally; other reasons follow the target's `trapExit`.
    */
   async exit(pid: Pid, reason: Term): Promise<void> {
-    if (pid.node === this.name) return this.local(pid)?.exitSignal(this.pid, reason, true);
+    if (pid.node === this.name) return this.local(pid)?.exitSignal(this.pid, copy(reason), true);
     const conn = await this.dial(pid.node.name);
     if (conn.peerFlags & DFLAG.EXIT_PAYLOAD) conn.send(tuple(OP.PAYLOAD_EXIT2, this.pid, pid), reason);
     else conn.send(tuple(OP.EXIT2, this.pid, pid, reason));
@@ -499,17 +499,17 @@ export class ErlNode {
     if (typeof to === "string") {
       const mb = this.names.get(erlangName(to));
       if (!mb) throw new Error(`no process registered as ${to}`);
-      return mb.deliver(msg);
+      return mb.deliver(copy(msg));
     }
     if (to instanceof Pid) {
-      if (to.node === this.name) return this.local(to)?.deliver(msg);
+      if (to.node === this.name) return this.local(to)?.deliver(copy(msg));
       const conn = await this.dial(to.node.name);
       if (conn.peerFlags & DFLAG.SEND_SENDER) conn.send(tuple(OP.SEND_SENDER, from, to), msg);
       else conn.send(tuple(OP.SEND, atom(""), to), msg);
       return;
     }
     const [name, node] = [erlangName(to[0]), to[1]];
-    if (node === this.name.name) return this.names.get(name)?.deliver(msg);
+    if (node === this.name.name) return this.names.get(name)?.deliver(copy(msg));
     const conn = await this.dial(node);
     conn.send(tuple(OP.REG_SEND, from, atom(""), atom(name)), msg);
   }
@@ -651,6 +651,11 @@ export class ErlNode {
     const conns = await Promise.allSettled(this.connections.values());
     for (const c of conns) if (c.status === "fulfilled") c.value.close();
   }
+}
+
+/** The exit reason of a process whose JS code threw `err`: `{:js_error, message}`. */
+export function jsErrorReason(err: unknown): Term {
+  return tuple(atom("js_error"), err instanceof Error ? err.message : String(err));
 }
 
 /** `:normal`, `:shutdown` and `{:shutdown, _}`: exits a supervisor does not restart. */

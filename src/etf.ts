@@ -724,3 +724,12 @@ function plain(t: Term): unknown {
   }
   return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, plain(v)]));
 }
+
+/**
+ * A copy of `t` as another process would receive it: encoded and decoded,
+ * so strings become binaries, `null` becomes `nil`, and nothing is shared
+ * with the sender. Used for messages between processes of the same node.
+ */
+export function copy(t: Term): Term {
+  return decode(encode(t));
+}
