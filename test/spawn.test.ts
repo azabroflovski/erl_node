@@ -110,3 +110,15 @@ test("erpc timeout covers a node that never answers the spawn request", async ()
   expect(Date.now() - started).toBeLessThan(1000);
   await silent.close();
 });
+
+test("node.module calls remote functions through erpc", async () => {
+  const lists = node.module<"seq" | "no_such_function">(remote.name, "lists");
+  expect(await lists.seq(1, 3)).toEqual([1, 2, 3]);
+  const str = node.module(remote.name, "Elixir.String");
+  expect(binaryToString((await str.upcase!("abc")) as Uint8Array)).toBe("ABC");
+  expect(await str["valid?"]!("abc")).toBe(true);
+  const err = await lists.no_such_function().catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(ErpcError);
+  // Awaiting the proxy itself must not hang.
+  expect(await lists).toBe(lists);
+});

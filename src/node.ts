@@ -601,6 +601,35 @@ export class ErlNode {
     }
   }
 
+  /**
+   * The functions of module `mod` on `remote` as JS functions, each one an
+   * `erpc` call:
+   *
+   *     const users = node.module(APP, "Elixir.MyApp.Users");
+   *     await users.get(1); // :erpc.call(APP, MyApp.Users, :get, [1])
+   *
+   * Names with `?` or `!` need brackets: `users["valid?"](x)`. Nothing is
+   * checked up front: a missing function fails when called, with `ErpcError`.
+   * List the function names to have them typed as always present:
+   * `node.module<"get" | "list">(APP, "Elixir.MyApp.Users")`.
+   */
+  module<Fn extends string = string>(
+    remote: string,
+    mod: string,
+    opts: { timeout?: number } = {},
+  ): { [F in Fn]: (...args: Term[]) => Promise<Term> } {
+    return new Proxy(
+      {},
+      {
+        get: (_, fn) => {
+          // `then` must stay undefined, or `await node.module(...)` would treat the proxy as a promise.
+          if (typeof fn !== "string" || fn === "then") return undefined;
+          return (...args: Term[]) => this.erpc(remote, mod, fn, args, opts.timeout);
+        },
+      },
+    ) as { [F in Fn]: (...args: Term[]) => Promise<Term> };
+  }
+
   /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
   async close() {
     this.closing = true;
