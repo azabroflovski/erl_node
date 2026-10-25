@@ -70,6 +70,7 @@ export class ErlNode {
   private server?: Server;
   private registration?: Registration;
   private closing = false;
+  private watchers = new Set<NodeWatcher>();
   private restarts = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(opts: NodeOptions) {
@@ -166,17 +167,64 @@ export class ErlNode {
   private adopt(remote: string, conn: Connection) {
     this.established.set(remote, conn);
     conn.onMessage = (control, payload) => this.dispatch(conn, control, payload);
-    void conn.done.then(() => {
+    void conn.done.then((err) => {
       if (this.established.get(remote) === conn) {
         this.established.delete(remote);
         this.connections.delete(remote);
       }
       for (const p of [...this.processes.values()]) p.connectionLost(remote);
+      // A connection replaced by a newer one is not a node going down.
+      if (!this.established.has(remote)) {
+        for (const w of this.watchers) if (w.remote === remote) this.nodeDown(w, err.message);
+      }
     });
     for (const f of this.arrivals.get(remote) ?? []) f(conn);
     this.arrivals.delete(remote);
+    for (const w of this.watchers) {
+      if (w.remote !== remote || w.up) continue;
+      w.up = true;
+      clearTimeout(w.timer);
+      notify(w, "up");
+    }
   }
 
+  /**
+   * Watches the connection to `remote`, like `Node.monitor(remote, true)`:
+   * `handler("up")` when a connection is established, `handler("down",
+   * reason)` when it is lost. If there is no connection now, "down" comes
+   * right away. With `reconnect`, the node tries to connect again every
+   * `reconnect` ms while `remote` is down. Returns a function that stops
+   * watching.
+   */
+  monitor(
+    remote: string,
+    handler: (event: "up" | "down", reason?: string) => void,
+    opts: { reconnect?: number } = {},
+  ): () => void {
+    const w: NodeWatcher = { remote, handler, reconnect: opts.reconnect, up: this.established.has(remote) };
+    this.watchers.add(w);
+    if (!w.up) queueMicrotask(() => this.nodeDown(w, "not connected"));
+    return () => {
+      this.watchers.delete(w);
+      clearTimeout(w.timer);
+    };
+  }
+
+  private nodeDown(w: NodeWatcher, reason: string) {
+    if (!this.watchers.has(w)) return;
+    w.up = false;
+    notify(w, "down", reason);
+    this.scheduleReconnect(w);
+  }
+
+  private scheduleReconnect(w: NodeWatcher) {
+    if (w.reconnect === undefined || this.closing || !this.watchers.has(w)) return;
+    clearTimeout(w.timer);
+    w.timer = setTimeout(() => {
+      if (w.up || !this.watchers.has(w)) return;
+      this.dial(w.remote).catch(() => this.scheduleReconnect(w));
+    }, w.reconnect);
+  }
 
   /**
    * Accepts connections from other nodes and registers this node in the
@@ -658,6 +706,8 @@ export class ErlNode {
   /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
   async close() {
     this.closing = true;
+    for (const w of this.watchers) clearTimeout(w.timer);
+    this.watchers.clear();
     for (const timer of this.restarts) clearTimeout(timer);
     this.restarts.clear();
     for (const p of [...this.processes.values()]) p.exit(atom("shutdown"));
@@ -668,6 +718,22 @@ export class ErlNode {
     this.server = undefined;
     const conns = await Promise.allSettled(this.connections.values());
     for (const c of conns) if (c.status === "fulfilled") c.value.close();
+  }
+}
+
+type NodeWatcher = {
+  remote: string;
+  handler: (event: "up" | "down", reason?: string) => void;
+  reconnect?: number;
+  up: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
+function notify(w: NodeWatcher, event: "up" | "down", reason?: string) {
+  try {
+    w.handler(event, reason);
+  } catch (err) {
+    console.error(`erlnode: monitor handler for ${w.remote} failed:`, err);
   }
 }
 
