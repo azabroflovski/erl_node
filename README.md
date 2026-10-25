@@ -79,6 +79,8 @@ The API follows Elixir:
 | `Process.flag(:trap_exit, true)` | `self.trapExit = true` |
 | `Phoenix.PubSub.subscribe/2` | `self.subscribe(node, pubsub, topic)` |
 | `use GenServer`, `GenServer.start_link/3` | `defineGenServer({...})`, `.start(node, opts)` |
+| `Phoenix.PubSub.broadcast/3` | `node.broadcast(node, pubsub, topic, msg)` |
+| `Node.monitor/2` | `node.monitor(node, handler, { reconnect })` |
 | `exit/1`, `Process.exit/2` | `self.exit(reason)`, `node.exit(pid, reason)` |
 
 One node keeps any number of connections, outgoing and incoming.
@@ -113,10 +115,20 @@ node.serve("prices", {
   info: (msg) => console.log(msg),    // any other message
 });
 
-// Call functions of a remote module through :erpc. Listing the names
-// is optional and only gives types.
-const users = node.module<"get" | "list">(APP, "MyApp.Users");
+// Call functions of a remote module through :erpc. The interface is
+// optional and only gives types; nothing checks it at run time.
+interface Users {
+  get(id: number): Promise<Term>;
+  list(opts: Term): Promise<Term>;
+}
+const users = node.module<Users>(APP, "MyApp.Users");
 await users.get(1);                   // :erpc.call(APP, MyApp.Users, :get, [1])
+
+// Phoenix.PubSub.broadcast(MyApp.PubSub, "orders", msg) from JS.
+await node.broadcast(APP, "MyApp.PubSub", "orders", tuple(atom("created"), 42));
+
+// Know when the Elixir node goes away and comes back.
+node.monitor(APP, (event, reason) => console.log(event, reason), { reconnect: 1000 });
 
 // Start a process again after a crash, like a :transient supervisor child.
 node.spawn(async (self) => { /* ... */ }, { restart: { delay: 1000 } });
@@ -171,7 +183,11 @@ await Rates.start(node, { name: "Rates", restart: true });
   process and the pending call fails on the Elixir side; `serve(name,
   handlers, { restart })` brings it back.
 - `module` checks nothing up front: a missing function fails when called.
-  Names with `?` or `!` need brackets: `users["valid?"](x)`.
+  Names with `?` or `!` need brackets: `users["valid?"](x)`. Instead of an
+  interface, a union of names works too: `node.module<"get" | "list">(...)`.
+- `monitor` calls the handler with `"down"` right away when there is no
+  connection, then on every change. Without `reconnect` nothing tries to
+  connect again, as in Erlang; the next `call` or `send` does.
 - `restart` does not restart after `:normal`, `:shutdown` or
   `{:shutdown, _}`. Each run gets a new pid; register a name for a stable
   address.
@@ -201,10 +217,14 @@ Nothing from JS becomes an atom unless you ask for it: object keys stay
 strings (`{ name: "Bob" }` → `%{"name" => "Bob"}`), strings stay binaries.
 Atoms are never garbage collected and a node has a limit on them, so
 turning outside data into atoms can bring the node down. When the Elixir
-side wants atom keys, say so:
+side wants atoms, say so with these helpers:
 
 ```ts
-new Map([[atom("name"), "Bob"]]); // %{name: "Bob"}
+import { amap, kw, struct } from "erlnode";
+
+kw({ timeout: 5000, force: true });   // [timeout: 5000, force: true]
+amap({ name: "Bob", age: 30 });       // %{name: "Bob", age: 30}
+struct("MyApp.User", { name: "Bob" }); // %MyApp.User{name: "Bob"} (no defaults filled in)
 ```
 
 `toJS(term)` turns a decoded term into plain JS data: atoms become strings
