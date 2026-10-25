@@ -146,6 +146,35 @@ node.spawn(async (self) => {
 });
 ```
 
+### Answering GenServer.call and GenServer.cast
+
+A JS process can stand in for a GenServer: `GenServer.call` arrives as
+`{:"$gen_call", from, request}` and is answered with `node.reply(from, value)`,
+`GenServer.cast` arrives as `{:"$gen_cast", request}`. State is a plain variable.
+
+```ts
+import { atom, start, type Tuple } from "erlnode";
+
+const node = start({ name: "js@localhost", cookie: "secret" });
+await node.listen();
+
+// GenServer.cast({:counter, :"js@localhost"}, {:add, 5})
+// GenServer.call({:counter, :"js@localhost"}, :inc) #=> 6
+node.spawn(async (self) => {
+  self.register("counter");
+  let count = 0;
+  for (;;) {
+    const [tag, a, b] = ((await self.receive()) as Tuple).elements;
+    if (tag === atom("$gen_call") && b === atom("inc")) {
+      await node.reply(a!, ++count);
+    } else if (tag === atom("$gen_cast")) {
+      const [op, n] = (a as Tuple).elements;
+      if (op === atom("add")) count += n as number;
+    }
+  }
+});
+```
+
 ## Security
 
 The cookie gives full access to the remote node: whoever has it can run any

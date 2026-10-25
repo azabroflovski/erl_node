@@ -51,17 +51,26 @@ test("remote sends to a registered mailbox", async () => {
   mb.exit();
 });
 
-test("GenServer.call into a mailbox", async () => {
-  const mb = inbox(listener);
-  mb.register("server");
-  void (async () => {
-    const msg = (await mb.receive(undefined, 5000)) as Tuple;
-    expect(msg.at(0)).toBe(atom("$gen_call"));
-    await listener.reply(msg.at(1)!, tuple(atom("pong"), msg.at(2)!));
-  })();
-  const res = await rpc("Elixir.GenServer", "call", [tuple(atom("server"), atom(LISTENER)), atom("ping")]);
-  expect(res).toEqual(tuple(atom("pong"), atom("ping")));
-  mb.exit();
+test("GenServer.call and GenServer.cast into a JS process (README example)", async () => {
+  // Same body as in the README.
+  const pid = listener.spawn(async (self) => {
+    self.register("counter");
+    let count = 0;
+    for (;;) {
+      const [tag, a, b] = ((await self.receive()) as Tuple).elements;
+      if (tag === atom("$gen_call") && b === atom("inc")) {
+        await listener.reply(a!, ++count);
+      } else if (tag === atom("$gen_cast")) {
+        const [op, n] = (a as Tuple).elements;
+        if (op === atom("add")) count += n as number;
+      }
+    }
+  });
+  const counter = tuple(atom("counter"), atom(LISTENER));
+  expect(await rpc("Elixir.GenServer", "cast", [counter, tuple(atom("add"), 5)])).toBe(atom("ok"));
+  expect(await rpc("Elixir.GenServer", "call", [counter, atom("inc")])).toBe(6);
+  expect(await rpc("Elixir.GenServer", "call", [counter, atom("inc")])).toBe(7);
+  await listener.exit(pid, atom("kill"));
 });
 
 test("remote monitors a registered mailbox by name", async () => {
