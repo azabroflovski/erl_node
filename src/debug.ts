@@ -8,7 +8,7 @@ export function debugEnabled(): boolean {
 }
 
 /** Writes a debug line to stderr. */
-export function debug(line: string) {
+export function debug(line: string): void {
   console.error(`erlnode: ${line}`);
 }
 

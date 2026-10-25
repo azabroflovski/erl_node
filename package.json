@@ -2,15 +2,33 @@
   "name": "erlnode",
   "version": "0.0.0",
   "description": "JS/TS node for BEAM over the Erlang distribution protocol",
+  "license": "MIT",
   "type": "module",
-  "main": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "build": "tsdown",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
-  "license": "MIT",
   "devDependencies": {
     "bun-types": "^1.4.4",
+    "tsdown": "^0.23.2",
     "typescript": "^7.0.2"
   }
 }

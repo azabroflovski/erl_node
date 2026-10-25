@@ -153,7 +153,7 @@ export class Connection {
   }
 
   /** Sends a control message and an optional payload. */
-  send(control: Tuple, payload?: Term) {
+  send(control: Tuple, payload?: Term): void {
     if (this.closed) throw new Error(`connection to ${this.peerName} is closed`);
     if (this.debug) debug(`→ ${this.peerName} ${describe(control, payload)}`);
     this.wrote = true;
@@ -170,23 +170,23 @@ export class Connection {
   }
 
   /** Like `send`, but does nothing once the connection is closed. */
-  trySend(control: Tuple, payload?: Term) {
+  trySend(control: Tuple, payload?: Term): void {
     if (!this.closed) this.send(control, payload);
   }
 
   /** Exit signal over a link from `from` to `to`. */
-  exit(from: Pid, to: Pid, reason: Term) {
+  exit(from: Pid, to: Pid, reason: Term): void {
     if (this.peerFlags & DFLAG.EXIT_PAYLOAD) this.trySend(tuple(OP.PAYLOAD_EXIT, from, to), reason);
     else this.trySend(tuple(OP.EXIT, from, to, reason));
   }
 
   /** Tells the monitoring process `to` that `from` is gone. */
-  monitorExit(from: Pid | Atom, to: Pid, ref: Ref, reason: Term) {
+  monitorExit(from: Pid | Atom, to: Pid, ref: Ref, reason: Term): void {
     if (this.peerFlags & DFLAG.EXIT_PAYLOAD) this.trySend(tuple(OP.PAYLOAD_MONITOR_P_EXIT, from, to, ref), reason);
     else this.trySend(tuple(OP.MONITOR_P_EXIT, from, to, ref, reason));
   }
 
-  close() {
+  close(): void {
     this.shutdown(new Error("connection closed by us"));
   }
 

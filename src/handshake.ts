@@ -23,14 +23,14 @@ export const DFLAG = {
   HANDSHAKE_23: 0x1000000n,
   UNLINK_ID: 0x2000000n,
   MANDATORY_25_DIGEST: 0x4000000n,
-  SPAWN: 0x1n << 32n,
-  V4_NC: 0x4n << 32n,
+  SPAWN: 0x100000000n, // 1 << 32
+  V4_NC: 0x400000000n, // 4 << 32
 } as const;
 
 // Mandatory for OTP 26+: MANDATORY_25_DIGEST stands for the OTP 25 set,
 // V4_NC and UNLINK_ID were added in OTP 26. DFLAG_PUBLISHED is not set,
 // so we are a hidden node.
-export const OUR_FLAGS =
+export const OUR_FLAGS: bigint =
   DFLAG.MANDATORY_25_DIGEST |
   DFLAG.EXTENDED_REFERENCES |
   DFLAG.FUN_TAGS |

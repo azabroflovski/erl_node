@@ -2,7 +2,7 @@
 
 ![OTP 23–29](https://img.shields.io/badge/OTP-23%E2%80%9329-A90533)
 ![Elixir 1.14–1.20](https://img.shields.io/badge/Elixir-1.14%E2%80%931.20-4B275F)
-![Bun](https://img.shields.io/badge/runtime-Bun-black)
+![runtime: Bun, Node 22+, Deno 2](https://img.shields.io/badge/runtime-Bun%20%7C%20Node%2022%2B%20%7C%20Deno%202-black)
 ![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -10,7 +10,8 @@ A JS/TS node for BEAM. It connects to an Erlang or Elixir node over the
 native distribution protocol.
 
 Zero dependencies: the term codec and the protocol are written from scratch.
-Tested with Bun against OTP 23 to 29.
+Tested with Bun against OTP 23 to 29; the built package also runs on
+Node 22+ and Deno 2.
 
 ## Example
 
@@ -467,6 +468,12 @@ Tests start real Elixir nodes, so `elixir` and `epmd` must be on the PATH.
 The Phoenix.PubSub test installs `phoenix_pubsub` with `Mix.install`, so its
 first run needs access to hex.pm.
 `ERLNODE_LONG=1 bun test` also runs a 3 minute keepalive test.
+
+`bun run build` builds `dist/` with tsdown: one ESM file and its type
+declarations. `node scripts/smoke.mjs` (or `deno run -A scripts/smoke.mjs`)
+runs the built package against a live Elixir node outside Bun. TypeScript
+projects on Node need `@types/node`, since the public types mention
+`node:net` sockets.
 
 `scripts/test-otp.sh` runs the suite against OTP 23 to 29 with nix
 (`scripts/test-otp.sh 25 26` for some of them). CI runs OTP 24 to 29;

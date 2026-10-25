@@ -19,7 +19,7 @@ export interface NodeInfo {
  * Asks EPMD on `host` which port node `name` (the part before `@`) listens on.
  * Throws if the node is not registered.
  */
-export async function portPlease(host: string, name: string, epmdPort = EPMD_PORT): Promise<NodeInfo> {
+export async function portPlease(host: string, name: string, epmdPort: number = EPMD_PORT): Promise<NodeInfo> {
   const nameBytes = new TextEncoder().encode(name);
   const req = new Uint8Array(3 + nameBytes.length);
   const view = new DataView(req.buffer);
@@ -64,7 +64,7 @@ export interface Registration {
  * Registers node `name` (the part before `@`) listening on `port` with the
  * local EPMD. The registration lasts while the returned connection is open.
  */
-export async function register(name: string, port: number, epmdPort = EPMD_PORT): Promise<Registration> {
+export async function register(name: string, port: number, epmdPort: number = EPMD_PORT): Promise<Registration> {
   const nameBytes = new TextEncoder().encode(name);
   const body = Buffer.alloc(13 + nameBytes.length);
   body[0] = ALIVE2_REQ;

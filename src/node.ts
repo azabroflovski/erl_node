@@ -54,7 +54,7 @@ export class CallError extends Error {
  */
 export class ErlNode {
   readonly name: Atom;
-  readonly creation = randomInt(4, 2 ** 32);
+  readonly creation: number = randomInt(4, 2 ** 32);
   /** Sender pid for messages sent from outside a process. */
   readonly pid: Pid;
 
@@ -90,7 +90,7 @@ export class ErlNode {
   }
 
   /** Closes the connection to `remote`, like `Node.disconnect/1`. */
-  disconnect(remote: string) {
+  disconnect(remote: string): void {
     this.established.get(remote)?.close();
   }
 
@@ -518,13 +518,13 @@ export class ErlNode {
   }
 
   /** Forgets an exited process and its names. Called by `Process.exit`. */
-  drop(p: Process) {
+  drop(p: Process): void {
     this.processes.delete(p.pid.id);
     for (const [name, owner] of this.names) if (owner === p) this.names.delete(name);
   }
 
   /** Registers `p` under `name`, so remote processes can send to `{name, node}`. */
-  register(name: string, p: Process) {
+  register(name: string, p: Process): void {
     if (!p.alive) throw new Error("process exited");
     name = erlangName(name);
     const owner = this.names.get(name);
@@ -704,7 +704,7 @@ export class ErlNode {
   }
 
   /** Ends all processes with `:shutdown`, stops listening, unregisters from EPMD and closes all connections. */
-  async close() {
+  async close(): Promise<void> {
     this.closing = true;
     for (const w of this.watchers) clearTimeout(w.timer);
     this.watchers.clear();

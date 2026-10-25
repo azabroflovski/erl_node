@@ -60,13 +60,13 @@ export class Process {
 
   // The fields below are kept up to date by ErlNode as signals arrive.
   /** Linked pids by key; `unlinking` holds the id of a pending UNLINK_ID. */
-  readonly links = new Map<string, { pid: Pid; unlinking?: number }>();
+  readonly links: Map<string, { pid: Pid; unlinking?: number }> = new Map();
   /** Monitors this process owns, by ref key. */
-  readonly monitors = new Map<string, { ref: Ref; target: Pid | Atom; node: string; local?: Process }>();
+  readonly monitors: Map<string, { ref: Ref; target: Pid | Atom; node: string; local?: Process }> = new Map();
   /** Remote processes monitoring this process, by ref key. */
-  readonly monitoredBy = new Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }>();
+  readonly monitoredBy: Map<string, { ref: Ref; pid: Pid; proc: Pid | Atom }> = new Map();
   /** Spawn requests waiting for SPAWN_REPLY, by request id key. */
-  readonly spawns = new Map<string, PendingSpawn>();
+  readonly spawns: Map<string, PendingSpawn> = new Map();
 
   constructor(
     readonly pid: Pid,
@@ -74,7 +74,7 @@ export class Process {
   ) {}
 
   /** Puts a message into the mailbox. */
-  deliver(msg: Term) {
+  deliver(msg: Term): void {
     if (!this.alive) return;
     const i = this.waiters.findIndex((w) => w.match(msg));
     if (i === -1) {
@@ -87,7 +87,7 @@ export class Process {
   }
 
   /** Takes the first message that satisfies `match`, waiting up to `timeout` ms for one. */
-  receive(match: (msg: Term) => boolean = () => true, timeout = Infinity): Promise<Term> {
+  receive(match: (msg: Term) => boolean = () => true, timeout: number = Infinity): Promise<Term> {
     if (!this.alive) return Promise.reject(new Error("process exited"));
     const i = this.queue.findIndex(match);
     if (i !== -1) return Promise.resolve(this.queue.splice(i, 1)[0]!);
@@ -119,7 +119,7 @@ export class Process {
   }
 
   /** Registers this process under `name` on its node, like `Process.register/2`. */
-  register(name: string) {
+  register(name: string): void {
     this.node.register(name, this);
   }
 
@@ -285,7 +285,7 @@ export class Process {
   }
 
   /** The remote node answered a spawn request. Flags: 1 = linked, 2 = monitored. */
-  spawnReply(reqId: Ref, flags: number, result: Term) {
+  spawnReply(reqId: Ref, flags: number, result: Term): void {
     const pending = this.spawns.get(reqId.key);
     if (!pending) return;
     this.spawns.delete(reqId.key);
@@ -296,7 +296,7 @@ export class Process {
   }
 
   /** Removes a monitor and drops its `:DOWN` message if one already arrived. */
-  demonitor(ref: Ref) {
+  demonitor(ref: Ref): void {
     const mon = this.monitors.get(ref.key);
     this.queue = this.queue.filter((m) => !isDown(m, ref));
     if (!mon) return;
@@ -310,7 +310,7 @@ export class Process {
    * signals, own monitors are removed, pending and later `receive` calls fail.
    * The function passed to `spawn` should return after this.
    */
-  exit(reason: Term = atom("normal")) {
+  exit(reason: Term = atom("normal")): void {
     if (!this.alive) return;
     this.alive = false;
     this.exitReason = reason;
@@ -340,7 +340,7 @@ export class Process {
   }
 
   /** An exit signal arrived over the link with `from`. */
-  linkExit(from: Pid, reason: Term) {
+  linkExit(from: Pid, reason: Term): void {
     const link = this.links.get(from.key);
     if (!link || link.unlinking !== undefined) return;
     this.links.delete(from.key);
@@ -348,7 +348,7 @@ export class Process {
   }
 
   /** An exit signal from `from`; `direct` for `exit/2`, where `:kill` cannot be trapped. */
-  exitSignal(from: Pid, reason: Term, direct: boolean) {
+  exitSignal(from: Pid, reason: Term, direct: boolean): void {
     if (!this.alive) return;
     if (direct && reason === atom("kill")) return this.exit(atom("killed"));
     if (this.trapExit) return this.deliver(tuple(EXIT, from, reason));
@@ -356,7 +356,7 @@ export class Process {
   }
 
   /** A monitored process went away. */
-  monitorDown(ref: Ref, reason: Term) {
+  monitorDown(ref: Ref, reason: Term): void {
     const mon = this.monitors.get(ref.key);
     if (!mon) return;
     this.monitors.delete(ref.key);
@@ -364,7 +364,7 @@ export class Process {
   }
 
   /** The connection to `peer` is gone: links and monitors over it fire with `:noconnection`. */
-  connectionLost(peer: string) {
+  connectionLost(peer: string): void {
     const noconnection = atom("noconnection");
     for (const [key, { pid, unlinking }] of this.links) {
       if (pid.node.name !== peer) continue;
