@@ -348,6 +348,45 @@ export class ErlNode {
   }
 
   /**
+   * Starts a process registered as `name` that answers like a GenServer:
+   *
+   * - `GenServer.call({name, node}, req)` runs `call(req, from)`; what it
+   *   returns is the reply (`undefined` replies `:ok`);
+   * - `GenServer.cast({name, node}, req)` runs `cast(req)`;
+   * - any other message runs `info(msg)`.
+   *
+   * Messages are handled one at a time, in order. Keep state in variables
+   * around the handlers. A handler that throws crashes the process, so a
+   * pending call fails on the caller's side; pass `restart` to start it
+   * again, as with `spawn`. Returns the pid of the first run.
+   */
+  serve(
+    name: string,
+    handlers: {
+      call?: (request: Term, from: Term) => Term | void | Promise<Term | void>;
+      cast?: (request: Term) => unknown;
+      info?: (msg: Term) => unknown;
+    },
+    opts: { restart?: boolean | { delay?: number } } = {},
+  ): Pid {
+    return this.spawn(async (self) => {
+      self.register(name);
+      for await (const msg of self) {
+        const [tag, a, b] = msg instanceof Tuple ? msg.elements : [];
+        if (tag === atom("$gen_call") && msg instanceof Tuple && msg.length === 3) {
+          if (!handlers.call) throw new Error(`${name} got a call but has no call handler`);
+          const reply = await handlers.call(b!, a!);
+          await this.reply(a!, reply === undefined ? atom("ok") : reply);
+        } else if (tag === atom("$gen_cast") && msg instanceof Tuple && msg.length === 2) {
+          await handlers.cast?.(a!);
+        } else {
+          await handlers.info?.(msg);
+        }
+      }
+    }, opts);
+  }
+
+  /**
    * Calls `handler` for every broadcast on Phoenix.PubSub `topic` of `remote`:
    * `node.subscribe(APP, "Elixir.MyApp.PubSub", "orders", (event) => ...)`.
    * When the subscription or the connection is lost, it subscribes again

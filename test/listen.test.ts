@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { atom, type ErlNode, start, type Term, Tuple, tuple } from "../src/index.ts";
 import { COOKIE, inbox, startNode, type TestNode } from "./support/node.ts";
 
@@ -145,4 +145,47 @@ test("a restarted peer replaces its stale connection (we answer alive)", async (
   await fresh.close();
   await old.close();
   await a.close();
+});
+
+test("serve: call, cast and info from Elixir", async () => {
+  let count = 0;
+  const infos: Term[] = [];
+  listener.serve("served", {
+    call: (req) => (req === atom("inc") ? ++count : req === atom("noop") ? undefined : count),
+    cast: (req) => {
+      const [op, n] = (req as Tuple).elements;
+      if (op === atom("add")) count += n as number;
+    },
+    info: (msg) => void infos.push(msg),
+  });
+  const served = tuple(atom("served"), atom(LISTENER));
+  await rpc("Elixir.GenServer", "cast", [served, tuple(atom("add"), 10)]);
+  expect(await rpc("Elixir.GenServer", "call", [served, atom("inc")])).toBe(11);
+  expect(await rpc("Elixir.GenServer", "call", [served, atom("noop")])).toBe(atom("ok"));
+  await rpc("erlang", "send", [served, atom("ping")]);
+  await Bun.sleep(50);
+  expect(infos).toEqual([atom("ping")]);
+  await listener.exit(listener.whereis("served")!, atom("kill"));
+});
+
+test("serve: a throwing call fails the caller, restart brings it back", async () => {
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  listener.serve(
+    "fragile",
+    {
+      call: (req) => {
+        if (req === atom("boom")) throw new Error("boom");
+        return atom("fine");
+      },
+    },
+    { restart: { delay: 20 } },
+  );
+  const fragile = tuple(atom("fragile"), atom(LISTENER));
+  const failed = (await rpc("Elixir.GenServer", "call", [fragile, atom("boom")])) as Tuple;
+  expect(failed.at(0)).toBe(atom("badrpc"));
+  await Bun.sleep(100);
+  expect(await rpc("Elixir.GenServer", "call", [fragile, atom("ok?")])).toBe(atom("fine"));
+  expect(log).toHaveBeenCalledTimes(1);
+  log.mockRestore();
+  await listener.exit(listener.whereis("fragile")!, atom("shutdown"));
 });
